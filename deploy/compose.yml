@@ -1,0 +1,27 @@
+services:
+  rent-gate:
+    image: ${RENT_GATE_IMAGE:?Set RENT_GATE_IMAGE to the verified image tag}
+    ports:
+      - "${RENT_GATE_HTTP_PORT:-8080}:8080"
+    environment:
+      RENT_GATE_ADMIN_PASSWORD: ${RENT_GATE_ADMIN_PASSWORD:?Set RENT_GATE_ADMIN_PASSWORD}
+      RENT_GATE_DB_PASSWORD: ${RENT_GATE_DB_PASSWORD:?Set RENT_GATE_DB_PASSWORD}
+      JAVA_TOOL_OPTIONS: -Xms64m -Xmx256m -XX:+ExitOnOutOfMemoryError
+    volumes:
+      - device-data:/app/data
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --max-time, '3', http://127.0.0.1:8080/health]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+volumes:
+  device-data:

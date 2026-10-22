@@ -78,7 +78,7 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-数据保存在命名卷 `device-data`。不要使用 `docker compose down -v`，它会删除设备数据。后台不能直接控制 WiFi，需要服务器端口允许来自设备网络的连接。
+数据保存在命名卷 `device-data`。不要使用 `docker compose down -v`，它会删除设备数据。后台不能直接控制 WiFi，需要服务器端口允许来自设备网络的连接。上传已打包 JAR 的部署方式、资源限制与维护步骤见 [服务器部署说明](docs/DEPLOYMENT.md)。
 
 ## 验证
 
