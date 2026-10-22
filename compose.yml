@@ -1,0 +1,12 @@
+services:
+  rent-gate:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      RENT_GATE_ADMIN_PASSWORD: ${RENT_GATE_ADMIN_PASSWORD:?Set RENT_GATE_ADMIN_PASSWORD before starting}
+    volumes:
+      - device-data:/app/data
+    restart: unless-stopped
+volumes:
+  device-data:

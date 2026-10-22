@@ -1,0 +1,17 @@
+/target/
+/data/
+/.tools/
+/.env
+/.idea/
+*.iml
+*.log
+firmware/.pio/
+firmware/.vscode/
+firmware/config.json
+__pycache__/
+/output/
+/.playwright-cli/
+*.pem
+*.key
+*.p12
+*.pfx

@@ -1,0 +1,13 @@
+.git
+.idea
+.tools
+target
+data
+.env*
+firmware
+output
+*.log
+*.pem
+*.key
+*.p12
+*.pfx

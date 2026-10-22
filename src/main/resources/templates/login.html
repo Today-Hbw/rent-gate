@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · Rent Gate</title><link rel="icon" href="/assets/icon.svg"><link rel="stylesheet" href="/assets/app.css"></head>
+<body class="login-page"><main class="login-card"><div class="brand"><span class="brand-icon">R</span><span>Rent Gate<small>设备租赁管理</small></span></div><p class="eyebrow">WELCOME TO YOUR WORKSPACE</p><h1>欢迎回来</h1><p class="muted">登录控制台，管理设备连接与运行。</p>
+<p th:if="${param.error}" class="error-banner" role="alert">账号或密码不正确，请重试。</p><p th:if="${param.logout}" class="credential-note" role="status">你已安全退出登录。</p>
+<form method="post" th:action="@{/login}"><label class="field">管理员账号<input name="username" autocomplete="username" value="admin" required autofocus></label><label class="field">密码<input type="password" name="password" autocomplete="current-password" required placeholder="输入管理员密码"></label><button type="submit" class="button primary login-submit">登录控制台 →</button></form><p class="login-help">首次启动的临时密码显示在服务日志中。<br>可通过环境变量设置固定管理员密码。</p><div class="login-footer"><span class="env-dot"></span> 第一阶段 · 无支付演示</div></main></body></html>
