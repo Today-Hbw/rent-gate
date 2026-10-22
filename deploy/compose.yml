@@ -6,6 +6,7 @@ services:
     environment:
       RENT_GATE_ADMIN_PASSWORD: ${RENT_GATE_ADMIN_PASSWORD:?Set RENT_GATE_ADMIN_PASSWORD}
       RENT_GATE_DB_PASSWORD: ${RENT_GATE_DB_PASSWORD:?Set RENT_GATE_DB_PASSWORD}
+      RENT_GATE_PUBLIC_BASE_URL: ${RENT_GATE_PUBLIC_BASE_URL:-}
       JAVA_TOOL_OPTIONS: -Xms64m -Xmx256m -XX:+ExitOnOutOfMemoryError
     volumes:
       - device-data:/app/data

@@ -1,43 +1,44 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>设备控制台 · Rent Gate</title><link rel="icon" href="/assets/icon.svg"><link rel="stylesheet" href="/assets/app.css">
-  <script src="/assets/app.js" defer></script>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>管理后台 · Rent Gate</title><link rel="icon" href="/assets/icon.svg">
+  <link rel="stylesheet" href="/assets/app.css"><script src="/assets/app.js" defer></script>
 </head>
 <body>
-  <aside class="sidebar">
-    <a class="brand" href="/" aria-label="Rent Gate 首页"><span class="brand-icon">R</span><span>Rent Gate<small>设备租赁管理</small></span></a>
-    <p class="nav-caption">工作空间</p>
-    <a class="nav-item active" href="/" aria-current="page"><span>▦</span> 设备控制台</a>
-    <button class="nav-item" id="help-nav"><span>↗</span> 连接与演示指南</button>
-    <div class="sidebar-footer"><span class="env-dot"></span> 第一阶段 · 演示环境<small>硬件控制与计时验证</small></div>
-  </aside>
-  <div class="workspace">
-    <header class="topbar"><span>工作空间 <span class="slash">/</span> 设备控制台</span><div><span class="avatar">A</span> 管理员 <button id="logout" class="text-button">退出</button></div></header>
-    <main>
-      <div class="page-heading"><div><p class="eyebrow">DEVICE CONSOLE</p><h1>设备控制台</h1><p class="muted">连接每一台设备，让开机与计时尽在掌握。</p></div><button class="button primary" id="add-device">＋ 添加设备</button></div>
-      <div class="notice"><span class="notice-icon">i</span><div><strong>演示模式已开启</strong><span>手动放行直接下发开机时长，不产生订单或费用。指令将在设备下一次轮询时生效。</span></div><span class="tag">PHASE 01</span></div>
-      <section class="stats" aria-label="设备统计">
-        <article class="stat"><div>设备总数 <span>▦</span></div><strong id="total">—</strong><small>已登记的全部设备</small></article>
-        <article class="stat"><div>在线设备 <span class="green">●</span></div><strong id="online">—</strong><small>最近 12 秒内收到心跳</small></article>
-        <article class="stat"><div>放行中 <span class="green">↗</span></div><strong id="running">—</strong><small>当前有效的开机指令</small></article>
-        <article class="stat"><div>离线设备 <span>◌</span></div><strong id="offline">—</strong><small>未连接或心跳超时</small></article>
-      </section>
-      <section class="device-panel">
-        <div class="panel-heading"><div><h2>全部设备 <span id="device-count" class="count">0</span></h2><p class="muted">查看连接状态，远程控制设备运行。</p></div><button class="button secondary" id="refresh">↻ 刷新</button></div>
-        <div class="toolbar"><label class="search"><span>⌕</span><input id="search" placeholder="搜索设备名称或编号" aria-label="搜索设备"></label><label class="filter">状态 <select id="status-filter"><option value="all">全部设备</option><option value="online">在线</option><option value="offline">离线</option><option value="running">放行中</option></select></label><label class="duration-label">放行时长 <input id="duration" type="number" value="30" min="1" max="1440" step="1"> 分钟</label></div>
-        <div id="fetch-error" class="error-banner" role="alert" hidden></div>
-        <div class="table-wrap"><table><thead><tr><th>设备名称 / 编号</th><th>连接状态</th><th>运行指令</th><th>剩余时间</th><th>最近心跳</th><th class="operations">操作</th></tr></thead><tbody id="devices"></tbody></table></div>
-        <div id="empty" class="empty" hidden><div class="empty-icon">▦</div><h3 id="empty-title">还没有设备</h3><p id="empty-text">添加第一台设备，开始验证开机与倒计时。</p><button class="button secondary" id="empty-add">＋ 添加设备</button></div>
-        <div class="panel-footer"><span id="shown">正在加载设备…</span><span><span id="sync-dot" class="env-dot"></span> <span id="last-sync">每 3 秒自动刷新</span></span></div>
-      </section>
-      <p class="footnote">连接状态来自设备心跳；“放行中”表示服务端指令，继电器实际状态以设备上报为准。断网时设备继续本地倒计时。</p>
-    </main>
-    <footer class="page-footer"><span>RENT GATE <span class="muted">/ 设备租赁控制系统</span></span><span>第一阶段 · 无支付演示</span></footer>
-  </div>
-  <dialog id="create-dialog"><form id="create-form"><div class="dialog-heading"><h2>添加设备</h2><button type="button" class="close" data-close="create-dialog" aria-label="关闭">×</button></div><p class="muted">先登记设备，再将编号和密钥填入 ESP 配网页面。</p><label class="field">设备名称<input name="name" required maxlength="80" placeholder="例如：一号桌洗牌机" autocomplete="off"></label><label class="field">设备编号<input name="device_id" required maxlength="64" pattern="[A-Za-z0-9_\-]{1,64}" placeholder="例如：shuffler-001" autocomplete="off"><small>1–64 位字母、数字、下划线或短横线，登记后不可修改。</small></label><p id="create-error" class="form-error" role="alert"></p><div class="dialog-footer"><button type="button" class="button secondary" data-close="create-dialog">取消</button><button type="submit" class="button primary">创建设备</button></div></form></dialog>
-  <dialog id="key-dialog"><div class="dialog-heading"><h2>设备连接凭据</h2><button class="close" data-close="key-dialog" aria-label="关闭">×</button></div><p class="muted">密钥仅在此显示一次，请立即保存并填入配网页面。</p><label class="field">设备编号<input id="credential-id" readonly></label><label class="field">设备密钥<input id="credential-key" readonly></label><p class="credential-note">密钥用于设备认证，请勿放入二维码、源码或公开分享。</p><div class="dialog-footer"><button class="button secondary" id="copy-key">复制密钥</button><button class="button primary" data-close="key-dialog">已保存</button></div></dialog>
-  <dialog id="help-dialog"><div class="dialog-heading"><h2>连接与演示指南</h2><button class="close" data-close="help-dialog" aria-label="关闭">×</button></div><ol class="guide"><li><strong>登记设备</strong><p>点击“添加设备”，保存设备编号和一次性密钥。</p></li><li><strong>烧录并配网</strong><p>将 firmware 固件烧入 ESP-01S。连接 RentGate-xxxxxx 热点，在 192.168.4.1 填 WiFi、服务器 HTTP 地址、编号和密钥。</p></li><li><strong>确认在线</strong><p>电脑与设备需要网络互通。服务器地址填写设备可访问的局域网 IP，不能填写 localhost。成功轮询后状态变为在线。</p></li><li><strong>验证开关与倒计时</strong><p>先用 5V 继电器灯验证。设置 1 分钟并放行，确认继电器吸合，倒计时结束后断开。也可点击“停止”下发断电指令。</p></li></ol><p class="credential-note">离线设备仍可接收放行记录，实际指令在恢复轮询后生效。停止指令也需网络恢复后才能送达。</p><div class="dialog-footer"><button class="button primary" data-close="help-dialog">知道了</button></div></dialog>
-  <div id="toast" class="toast" role="status" hidden></div>
+<aside class="sidebar">
+  <a href="#devices" class="brand"><img src="/assets/icon.svg" width="40" height="40" alt=""><span>Rent Gate<small>设备租赁管理</small></span></a>
+  <p class="nav-caption">工作空间</p>
+  <nav id="navigation" aria-label="管理导航">
+    <a href="#devices" data-page="devices"><span>▦</span>设备控制台</a>
+    <a href="#accounts" data-page="accounts" data-staff hidden><span>♙</span>账号与权限</a>
+    <a href="#types" data-page="types"><span>◇</span>设备类型</a>
+    <a href="#merchants" data-page="merchants"><span>⌂</span>商户资料</a>
+    <a href="#plans" data-page="plans"><span>◷</span>时长套餐</a>
+    <a href="#orders" data-page="orders"><span>≡</span>订单查询</a>
+    <a href="#statistics" data-page="statistics"><span>↗</span>收益统计</a>
+    <a href="#settings" data-page="settings" data-admin hidden><span>⚙</span>系统设置</a>
+    <a href="#profile" data-page="profile"><span>○</span>个人设置</a>
+  </nav>
+  <button id="help" class="sidebar-help">连接与使用指南 ↗</button>
+  <div class="sidebar-footer"><span class="dot"></span> 扫码试用已开放<small>支付功能暂未开通</small></div>
+</aside>
+<div class="workspace">
+  <header class="topbar"><span id="breadcrumb">工作空间 / 设备控制台</span><div><span id="actor-role" class="badge"></span><span id="actor-name">正在登录…</span><button id="logout" class="text-button">退出</button></div></header>
+  <main>
+    <div class="page-heading"><div><p class="eyebrow">RENT GATE WORKSPACE</p><h1 id="page-title">设备控制台</h1><p id="page-description" class="muted"></p></div><div class="heading-actions"><button id="refresh" class="button secondary">↻ 刷新</button><button id="create" class="button primary" hidden>＋ 添加</button></div></div>
+    <div class="notice"><span>i</span><p>扫码免费试用与设备控制已开放。支付暂未开通，试用和手动放行不会产生收费订单。</p></div>
+    <div id="fetch-error" class="error-banner" role="alert" hidden></div>
+    <div id="content" aria-busy="true"><div class="empty-box">正在加载管理数据…</div></div>
+    <p id="last-sync" class="sync-note"></p>
+  </main>
+  <footer class="page-footer"><span>RENT GATE / 设备租赁控制系统</span><span id="scope-note">数据按账号权限隔离</span></footer>
+</div>
+
+<dialog id="editor"><form id="editor-form"><div class="dialog-heading"><h2 id="editor-title">编辑</h2><button type="button" class="close" data-close="editor" aria-label="关闭">×</button></div><p id="editor-description" class="muted"></p><div id="editor-fields"></div><p id="editor-error" class="form-error" role="alert"></p><div class="dialog-footer"><button type="button" class="button secondary" data-close="editor">取消</button><button type="submit" class="button primary">保存</button></div></form></dialog>
+<dialog id="credentials"><div class="dialog-heading"><h2>设备连接凭据</h2><button class="close" data-close="credentials" aria-label="关闭">×</button></div><p class="muted">设备密钥只显示一次，请保存后填入 ESP 配网页面。</p><label class="field">设备编号<input id="credential-id" readonly></label><label class="field">设备密钥<input id="credential-key" readonly></label><p class="hint">设备密钥用于硬件认证，请勿写进二维码或公开分享。</p><div class="dialog-footer"><button class="button secondary" id="copy-key">复制密钥</button><button class="button primary" data-close="credentials">已保存</button></div></dialog>
+<dialog id="qr-dialog"><div class="dialog-heading"><h2>设备扫码入口</h2><button class="close" data-close="qr-dialog" aria-label="关闭">×</button></div><p id="qr-title" class="muted"></p><img id="qr-image" class="qr-image" alt="设备免费试用二维码"><label class="field">客人页面地址<input id="qr-link" readonly></label><p id="qr-warning" class="hint" hidden></p><div class="dialog-footer"><a id="qr-open" class="button secondary" target="_blank" rel="noopener">打开客人页</a><a id="qr-download" class="button primary" download>下载二维码</a></div></dialog>
+<dialog id="confirmation"><form method="dialog"><div class="dialog-heading"><h2>确认操作</h2></div><p id="confirmation-text" class="confirmation-text"></p><div class="dialog-footer"><button class="button secondary" value="cancel">取消</button><button class="button primary" value="confirm">确认</button></div></form></dialog>
+<dialog id="help-dialog"><div class="dialog-heading"><h2>连接与使用指南</h2><button class="close" data-close="help-dialog" aria-label="关闭">×</button></div><ol class="guide"><li><strong>准备账号与设备</strong><p>管理员创建服务商，服务商创建老板账号。设备须分配给老板并选择设备类型，才能开放扫码试用。</p></li><li><strong>烧录与配网</strong><p>烧录 firmware 固件，串口读取热点密码。手机连接 RentGate 热点，在 192.168.4.1 填写 WiFi、可访问的服务器地址、设备编号和密钥。</p></li><li><strong>配置试用和套餐</strong><p>管理员或服务商配置设备类型的试用与冷却分钟数。老板配置对应类型的时长套餐，客人扫码后即可看到。</p></li><li><strong>打印二维码</strong><p>在设备行点击“二维码”，下载贴在机身。二维码只包含客人入口，不包含设备控制密钥。</p></li><li><strong>现场验证</strong><p>先低压测试继电器。设备在线、未运行且冷却结束时，客人可点“免费试用”；设备按本地倒计时自动断电。</p></li></ol><p class="hint">手动放行和停止在下次设备轮询时执行。断网后已有倒计时继续，到期断电；重设密钥后设备需更新配网参数。</p></dialog>
+<div id="toast" class="toast" role="status" hidden></div>
 </body></html>

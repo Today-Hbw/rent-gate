@@ -7,6 +7,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.dao.DataIntegrityViolationException;
 
 @RestControllerAdvice
 public class ApiErrors {
@@ -17,6 +18,11 @@ public class ApiErrors {
 
     @ExceptionHandler({MethodArgumentNotValidException.class, HttpMessageNotReadableException.class})
     ResponseEntity<Map<String, String>> invalid(Exception error) {
-        return ResponseEntity.badRequest().body(Map.of("message", "参数无效：设备编号仅限字母、数字、下划线和短横线（1–64位）；名称不超过80字；时长为1–1440整数分钟"));
+        return ResponseEntity.badRequest().body(Map.of("message", "请求参数无效，请检查必填项、格式与数值范围"));
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    ResponseEntity<Map<String,String>> conflict(DataIntegrityViolationException error) {
+        return ResponseEntity.status(409).body(Map.of("message","数据重复或仍被其他记录引用，请刷新后重试"));
     }
 }

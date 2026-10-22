@@ -14,6 +14,7 @@ jobs:
           cache: maven
       - run: ./mvnw -B -ntp verify
       - run: node --check src/main/resources/static/assets/app.js
+      - run: node --check src/main/resources/static/assets/guest.js
       - run: python -m py_compile scripts/simulate_device.py
       - run: g++ -std=c++11 -Wall -Wextra -Werror firmware/test/lease_timer_test.cpp -o /tmp/lease-test && /tmp/lease-test
   firmware:

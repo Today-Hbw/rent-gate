@@ -1,112 +1,99 @@
-# Rent Gate · 洗牌机出租演示
+# Rent Gate · 设备扫码租赁管理
 
-第一阶段：后台手动放行 → ESP 每 3 秒拉取指令 → 继电器通电 → 本地到期断电。不接真实支付，不产生订单；订单表已预建。没有多商户、试用冷却、客人付款页等第二阶段功能。
+手机扫码免费试用 → ESP 每 3 秒轮询 → 继电器通电 → 本地到期断电。提供平台管理员、服务商、老板三级账号、商户与设备管理、试用冷却、时长套餐、只读订单与收益统计。
+
+**本版实现 PRD 的非支付业务。** 微信/支付宝下单、回调、进件、退款和支付成功页未接入；套餐可展示和选择，付款按钮禁用。免费试用、手动放行不生成订单或收益。OTA 是 PRD 的后续扩展，当前通过串口烧录。
 
 ## 快速启动
 
-需要 **JDK 17–25**（建议 JDK 21）和联网环境。Maven Wrapper 会下载 Maven 3.9.11。默认端口 8080，后台与接口在同一个服务中，不需要另起前端或数据库。
-
-Windows PowerShell：
+需要 JDK 17–25，Maven Wrapper 会下载 Maven 3.9.11。后端、后台、客人 H5 和 H2 文件数据库包含在同一应用，无需单独前端或数据库服务。
 
 ```powershell
-# 如果默认 Java 版本低于 17，请先将 JAVA_HOME 指向本机 JDK 17+。
-$env:RENT_GATE_ADMIN_PASSWORD = Read-Host '设置管理员密码'
+$env:RENT_GATE_ADMIN_PASSWORD = Read-Host '首次初始化管理员密码（8–64字符）'
+# 手机扫码使用时，填写手机可访问的服务器地址，不能使用 localhost。
+$env:RENT_GATE_PUBLIC_BASE_URL = 'http://192.168.1.10:8080'
 .\mvnw.cmd spring-boot:run
 ```
 
-Linux/macOS：
+Linux/macOS 使用 `./mvnw`。访问 [本机后台](http://localhost:8080)，账号 `admin`。首次未设置密码时，随机初始密码显示在日志中并保存到数据库。之后密码从数据库读取，重启不会改变；环境变量只用于首次创建管理员。登录后在“个人设置”修改密码。
 
-```bash
-read -r -s -p 'Admin password: ' RENT_GATE_ADMIN_PASSWORD; echo
-export RENT_GATE_ADMIN_PASSWORD
-./mvnw spring-boot:run
-```
+也可运行 `./mvnw verify` 后执行 `java -jar target/rent-gate-0.1.0.jar`，或设置环境变量后 `docker compose up -d --build`。
 
-访问 **http://localhost:8080**，账号 `admin`。未设密码时，服务启动日志会显示本次启动的随机临时密码；重启后临时密码会改变。不要把真实密码、设备密钥或配网资料写进源码。
+## 从账号到手机试用
 
-打包运行：
+1. 管理员进入“账号与权限”，创建服务商账号；再为该服务商创建老板账号。服务商也可登录后自己创建名下老板。
+2. 在“商户资料”填写名称和对应商户号。服务商填写普通商户号，老板填写小微商户号；这里只维护资料，不会实际进件。
+3. 管理员或服务商在“设备类型”配置试用分钟数、冷却分钟数。内置平台通用“洗牌机”：试用 15 分钟、结束后冷却 120 分钟。
+4. “设备控制台”添加设备，选择老板和类型，保存仅显示一次的设备密钥。管理员可暂不分配老板，未分配设备只支持管理员手动控制，不能试用。
+5. 按 [固件说明](firmware/README.md) 烧录、配网，填写服务器 HTTP 地址、设备编号、设备密钥。服务器地址在配网时设置，不写死在固件中。
+6. 在“时长套餐”配置老板对应类型的套餐。老板登录只会看到并管理自己的设备、商户、套餐、订单和收益。
+7. 设备在线后，在设备行点击“二维码”，下载并贴在机身。客人用手机扫码打开 H5，点击“免费试用”，无需后台账号。
+8. 页面显示运行倒计时；设备收到指令后启动，到期自动断电。试用结束进入冷却，冷却到期且设备在线、空闲后才能再领。
 
-```powershell
-.\mvnw.cmd verify
-java -jar target/rent-gate-0.1.0.jar
-```
+二维码只包含随机客人入口，不含设备控制密钥。下载前应设置正确的 `RENT_GATE_PUBLIC_BASE_URL`，或从手机可访问的域名/IP 打开后台生成；更换该地址后需重新下载二维码。
 
-## 演示步骤
-
-1. 后台“添加设备”，填写自定义编号、名称，保存仅显示一次的设备密钥。
-2. 按 [固件说明](firmware/README.md) 烧录、配网，填入服务器地址、设备编号和密钥。ESP 必须访问服务器局域网 IP，不能使用 `localhost`。
-3. 设备第一次成功轮询后变为在线；每 3 秒刷新，超过 12 秒无心跳标记离线。
-4. 时长默认 30 分钟。联调时先设 **1 分钟**，点击开机，观察继电器灯和吸合声。
-5. 确认倒计时结束自动断开；再次放行后点击停止，观察下一轮询断开。
-6. 运行中关闭 WiFi 或暂停服务，确认已有本地倒计时仍到期断开；恢复网络后按服务端最新状态工作。
-
-没有硬件时，可在另一终端模拟设备（Python 3.10+，无需安装第三方包）：
+无硬件时可模拟心跳：
 
 ```powershell
 python scripts/simulate_device.py --device-id shuffler-001 --server http://localhost:8080
-# 按提示输入后台为该设备生成的密钥。
+# 按提示输入设备密钥，不要把密钥保存进脚本或仓库。
 ```
 
-## 计时与状态约定
+## 权限范围
 
-- 手动放行写入 `device.status` 和 `device.expire_ts`，数据库是唯一指令来源。时长为 **1–1440 整数分钟**。
-- 重复放行从当前时间重新计时，覆盖原到期时间，不叠加；页面对运行中的设备二次放行会提示。
-- `/poll` 返回 Unix **秒**时间戳、服务端时间和剩余秒数。固件用单调时钟计时，不依赖 ESP 的时间校准；同一到期时间的重复轮询不会延长本地计时。
-- 断网不立即断电，仍按最近一次有效指令在本地到期断电。断网期间无法收到新放行、停止或续时指令。PRD 中“保持当前状态”按这一规则解释，优先满足本地到期断电验收。
-- ESP 重启先断开继电器，再联网获取有效放行记录；服务器重启会保留设备和到期时间。未到期的放行会恢复下发。
-- 后台“放行中”表示有效服务端指令，**不等于继电器已吸合**。`relay_on` 是上一次请求上报值，下一次心跳才反映新指令的执行结果。离线时只显示历史上报。
-- 自动过期任务每秒更新数据库状态；轮询与列表也依据到期时间判断，不依赖任务执行时机。
-- 设备密钥仅保存 SHA-256 摘要。丢失可重置，旧密钥立即失效；ESP 需重新配网。密钥重置不会撤销已下发的本地倒计时。
+| 操作 | 平台管理员 | 服务商 | 老板 |
+| --- | --- | --- | --- |
+| 账号创建、停用、重置密码 | 服务商及全部老板 | 名下老板 | 仅修改自己的密码 |
+| 设备、二维码、手动控制与密钥 | 全部 | 名下老板 | 自己 |
+| 商户资料 | 全部 | 自己与名下老板 | 自己 |
+| 设备类型 | 全部；可建平台通用类型 | 自己的类型；通用类型只读 | 所属服务商及通用类型只读 |
+| 套餐、订单、收益 | 全部 | 名下老板 | 自己 |
+| 系统设置 | 可修改 | 只读 | 只读 |
 
-## 数据与配置
+角色与账号上级创建后固定，不提供跨服务商转移账号。设备可在停止后由有权限的上级重新分配，运行时不能变更归属或类型。所有权限在服务端校验，修改 URL 或伪造 ID 不能访问其他租户数据。停用/密码重置会让旧会话失效；停用服务商会同时阻止名下老板登录和新的客人试用。已有设备倒计时继续，需要断电时单独执行设备停止/停用。
 
-默认 H2 文件库位于启动工作目录的 `data/rent-gate.mv.db`，已被 Git 忽略。不要同时启动两个实例访问同一文件库。备份时先停服务，再复制整个 `data/` 目录；演示版按单实例部署。
+## 计时规则
 
-| 环境变量 | 默认值 / 用途 |
+- 手动放行 1–1440 整数分钟，从当前时间重新计时、覆盖原到期时间，不叠加。离线时可下发手动指令，恢复连接后按剩余时间执行。
+- 领取试用要求：设备启用、已分配有效老板/服务商、类型启用且试用时长大于 0、设备在线、空闲、冷却结束。并发领取通过设备行锁只授予一次。
+- PRD 对冷却公式有两种描述，本版按“**试用结束后冷却**”实现：`cooldown_until = 本次试用计划到期时间 + cooldown_minutes × 60`。15 分钟试用 + 120 分钟冷却，开始后第 135 分钟可再领。提前停止、手动放行、修改类型规则都不会清除已记录的冷却时间。
+- 列表与客人页按服务端到期时间显示，轮询不会续时。`status=on` 表示有效指令；继电器是否已执行以 `relay_on` 最近心跳回报为参考。
+- 固件使用单调时钟，断网后已有计时继续、到期断电；断网期间不能收到新指令。上电先断开，再联网获取最新有效指令。
+- 停用设备撤销服务器放行并关闭客人入口，设备下一次轮询收到 off。重置密钥使旧密钥立即失效，固件需更新密钥，已下发的本地倒计时不受影响。
+
+## 数据与部署
+
+默认数据库为工作目录 `data/rent-gate.mv.db`（H2 文件库），账号密码以 BCrypt 摘要保存，设备密钥以 SHA-256 摘要保存。账号、归属、试用、冷却、套餐和商户资料均持久化。Docker 使用 `device-data` 命名卷，**不要执行 `docker compose down -v`**。
+
+Flyway 自动创建/升级数据库。升级旧版前先停机备份整个数据库目录；旧设备编号、密钥和剩余运行时间保留，默认归属为空，管理员需分配老板。升级后回滚旧程序应同时恢复升级前备份，不能只换旧 JAR。
+
+| 环境变量 | 用途 |
 | --- | --- |
-| `PORT` | `8080` |
-| `RENT_GATE_ADMIN_PASSWORD` | 不设则启动时生成临时密码 |
-| `RENT_GATE_DB_URL` | `jdbc:h2:file:./data/rent-gate;DB_CLOSE_ON_EXIT=FALSE` |
-| `RENT_GATE_DB_PASSWORD` | 本地 H2 密码，默认空 |
+| `PORT` | 默认 8080 |
+| `RENT_GATE_ADMIN_PASSWORD` | 仅首次初始化 admin，8–64 字符、UTF-8 最多 72 字节；未设置则随机生成 |
+| `RENT_GATE_PUBLIC_BASE_URL` | 可选，二维码外部访问源，如 `https://rent.example.com`；不带路径/参数 |
+| `RENT_GATE_DB_URL` | 默认 `jdbc:h2:file:./data/rent-gate;DB_CLOSE_ON_EXIT=FALSE` |
+| `RENT_GATE_DB_PASSWORD` | H2 数据库密码，本地默认空 |
 
-后台登录使用 Session，30 分钟无操作过期，写操作受 CSRF 保护。设备轮询使用独立 `X-Device-Key`，不需要登录 Session。默认 HTTP 仅用于受控局域网演示；公网使用请配置 HTTPS/可信网络，避免密码与设备密钥在明文网络传输。第一阶段固件仅实现 HTTP，后续公网接入需增加证书校验。
+本版单实例运行，不能让多个进程同时访问同一 H2 文件。公网配置、HTTPS 反向代理、升级和备份步骤见 [部署文档](docs/DEPLOYMENT.md)。固件当前仅支持 HTTP；网页 HTTPS 与设备接入可分别配置，长期公网设备接入需后续增加固件证书校验。
 
-Docker（可选，先设置管理员密码）：
-
-```bash
-docker compose up -d --build
-docker compose logs -f
-```
-
-数据保存在命名卷 `device-data`。不要使用 `docker compose down -v`，它会删除设备数据。后台不能直接控制 WiFi，需要服务器端口允许来自设备网络的连接。上传已打包 JAR 的部署方式、资源限制与维护步骤见 [服务器部署说明](docs/DEPLOYMENT.md)。
-
-## 验证
+## 验证与目录
 
 ```powershell
-.\mvnw.cmd verify
+.\mvnw.cmd clean verify
 node --check src/main/resources/static/assets/app.js
-python -m py_compile scripts/simulate_device.py
+node --check src/main/resources/static/assets/guest.js
 pio run -d firmware
 ```
 
-后端测试覆盖放行、停止、时间边界、真实登录、CSRF、设备认证、密钥轮换、心跳超时、并发轮询和服务重启后的持久化。独立 C++ 计时器测试覆盖重复轮询、断网到期、旧指令不可重启和 `millis()` 溢出：
+集成测试覆盖三级数据隔离、真实登录/会话撤销、CSRF、试用并发/到期/冷却、商户套餐归属、收益与分页、旧库迁移和重启。软件验证及实物待验项见 [验收清单](docs/ACCEPTANCE.md)。
 
-```bash
-g++ -std=c++11 -Wall -Wextra -Werror firmware/test/lease_timer_test.cpp -o lease-test
-./lease-test
-```
-
-GitHub Actions 配置了后端验证、固件编译与固件 `.bin` 构件上传。接口见 [API 文档](docs/API.md)，交付边界与待验证项见 [验收清单](docs/ACCEPTANCE.md)。
-
-## 目录
-
-```text
-src/main/java/io/rentgate/   Spring Boot 服务与接口
-src/main/resources/         数据库建表、后台页、登录页
-src/test/                   后端集成与重启测试
-firmware/                   ESP-01S 固件、PlatformIO 配置和计时器测试
-scripts/simulate_device.py  无硬件轮询模拟器
-docs/                       API 和验收说明
-```
-
-技术参考：[Spring Boot 系统要求](https://docs.spring.io/spring-boot/3.5/system-requirements.html)、[Spring Security CSRF](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html)、[WiFiManager](https://github.com/tzapu/WiFiManager)、[ESP8266 HTTP 示例](https://github.com/esp8266/Arduino/blob/master/libraries/ESP8266HTTPClient/examples/BasicHttpClient/BasicHttpClient.ino)。
+| 目录 | 内容 |
+| --- | --- |
+| `src/main/java/io/rentgate` | 后端接口、鉴权与业务 |
+| `src/main/resources` | Flyway 迁移、后台、登录与客人 H5 |
+| `src/test` | 集成与持久化测试 |
+| `firmware` | ESP-01S 固件、烧录/配网说明、计时器测试 |
+| `scripts` | 无硬件设备模拟器 |
+| `deploy` | Docker 与 Nginx 部署模板 |
+| `docs` | [接口](docs/API.md)、[操作手册](docs/USER_GUIDE.md)、[部署](docs/DEPLOYMENT.md)、[验收](docs/ACCEPTANCE.md) |

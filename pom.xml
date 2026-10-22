@@ -3,9 +3,11 @@
   <modelVersion>4.0.0</modelVersion>
   <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.5.16</version><relativePath/></parent>
   <groupId>io.rentgate</groupId><artifactId>rent-gate</artifactId><version>0.1.0</version>
-  <name>Rent Gate</name><description>洗牌机出租 · 第一阶段设备控制演示</description>
+  <name>Rent Gate</name><description>设备扫码试用与多商户租赁管理</description>
   <properties><java.version>17</java.version></properties>
   <dependencies>
+    <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-core</artifactId></dependency>
+    <dependency><groupId>com.google.zxing</groupId><artifactId>javase</artifactId><version>3.5.4</version></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-thymeleaf</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>

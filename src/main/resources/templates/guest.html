@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="guest-token" th:content="${guestToken}"><meta name="theme-color" content="#147d68">
+  <title>扫码使用设备 · Rent Gate</title><link rel="icon" href="/assets/icon.svg">
+  <link rel="stylesheet" href="/assets/guest.css"><script src="/assets/guest.js" defer></script>
+</head>
+<body>
+<main class="guest-shell">
+  <header class="guest-header"><span class="guest-brand"><img src="/assets/icon.svg" alt="" width="28" height="28"><span id="site-name">Rent Gate</span></span><span class="guest-label">扫码即用</span></header>
+  <p class="eyebrow">WELCOME · 轻松开始一局</p>
+  <h1 id="device-name">正在连接设备…</h1><p id="merchant-name" class="muted">正在读取设备信息</p>
+  <div id="guest-error" class="message error" role="alert" hidden></div>
+  <section class="machine-card" aria-label="设备使用状态">
+    <div class="card-top"><span id="type-name">设备</span><span id="online-badge" class="status-pill">连接中</span></div>
+    <div class="machine-illustration" aria-hidden="true"><span>▦</span><i></i><i></i><i></i></div>
+    <p id="state-title" class="state-title">准备就绪，等待连接</p>
+    <p id="timer-label" class="muted">设备状态自动更新</p><strong id="remaining" class="remaining">--:--:--</strong>
+    <progress id="lease-progress" max="100" value="0" aria-label="剩余使用时间"></progress>
+    <p id="state-note" class="state-note" aria-live="polite">请稍候</p>
+    <button id="trial-button" class="trial-button" disabled>正在加载试用信息…</button>
+    <p id="trial-rule" class="trial-rule"></p>
+    <p id="trial-result" class="trial-result" role="status" hidden></p>
+  </section>
+  <section class="plans-section" aria-label="时长套餐"><div class="section-heading"><h2>选择使用时长</h2><span>明码标价</span></div><div id="plans" class="plans"></div><p id="plans-empty" class="muted" hidden>老板尚未设置时长套餐。</p><button id="pay-button" class="pay-button" disabled>支付暂未开通</button><p class="payment-note">当前可使用免费试用，暂不支持付费购买时长。</p></section>
+  <section class="usage-notes"><h2>使用说明</h2><ol><li>点击免费试用，设备收到指令后自动开机。</li><li>使用时间结束后自动断电，无需手动结束。</li><li>试用结束后进入冷却期，请按页面提示再次体验。</li></ol><p id="guest-notice"></p></section>
+  <footer>Rent Gate · 设备租赁服务</footer>
+</main>
+</body></html>

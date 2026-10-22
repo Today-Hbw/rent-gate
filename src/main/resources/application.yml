@@ -18,7 +18,10 @@ spring:
     password: ${RENT_GATE_DB_PASSWORD:}
   sql:
     init:
-      mode: always
+      mode: never
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 0
   jackson:
     property-naming-strategy: SNAKE_CASE
     deserialization:

@@ -27,7 +27,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest(properties = {"spring.datasource.url=jdbc:h2:mem:integration;DB_CLOSE_DELAY=-1", "RENT_GATE_ADMIN_PASSWORD=test-only-password"})
 @AutoConfigureMockMvc
-@WithMockUser(roles = "ADMIN")
+@WithMockUser(username="admin",roles = "ADMIN")
 class DeviceIntegrationTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
@@ -188,7 +188,8 @@ class DeviceIntegrationTest {
 
     @Test void concurrentPollsDoNotLoseRelease() throws Exception {
         String key = create().get("device_key").asText();
-        var pool = Executors.newFixedThreadPool(6);
+        java.util.concurrent.ExecutorService pool = new org.springframework.security.concurrent.DelegatingSecurityContextExecutorService(
+                Executors.newFixedThreadPool(6),org.springframework.security.test.context.TestSecurityContextHolder.getContext());
         try {
             var tasks = new java.util.ArrayList<java.util.concurrent.Callable<Void>>();
             for (int i=0;i<20;i++) {

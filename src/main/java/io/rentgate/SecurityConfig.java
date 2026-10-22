@@ -1,16 +1,13 @@
 package io.rentgate;
 
-import java.util.UUID;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
-import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
@@ -21,22 +18,18 @@ import org.springframework.http.HttpMethod;
 @Configuration
 public class SecurityConfig {
     @Bean
-    UserDetailsService users(@Value("${RENT_GATE_ADMIN_PASSWORD:}") String configuredPassword) {
-        String password = configuredPassword.isBlank() ? UUID.randomUUID().toString() : configuredPassword;
-        if (configuredPassword.isBlank()) {
-            LoggerFactory.getLogger(SecurityConfig.class).warn(
-                    "Temporary admin login: admin / {} (set RENT_GATE_ADMIN_PASSWORD for a stable password)", password);
-        }
-        return new InMemoryUserDetailsManager(User.withUsername("admin")
-                .password("{bcrypt}" + new BCryptPasswordEncoder().encode(password)).roles("ADMIN").build());
-    }
+    PasswordEncoder passwordEncoder() { return PasswordEncoderFactories.createDelegatingPasswordEncoder(); }
+
+    @Bean UserDetailsService users(AccountService accounts) { return accounts::principal; }
 
     @Bean
-    SecurityFilterChain security(HttpSecurity http) throws Exception {
+    SecurityFilterChain security(HttpSecurity http,AccountService accounts) throws Exception {
         return http
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/poll", "/health", "/login", "/assets/**", "/error").permitAll()
-                        .anyRequest().hasRole("ADMIN"))
+                        .requestMatchers("/poll", "/health", "/login", "/assets/**", "/error", "/r/**", "/api/public/**").permitAll()
+                        .requestMatchers("/admin/accounts/**").hasAnyRole("ADMIN","PROVIDER")
+                        .anyRequest().authenticated())
+                .addFilterAfter(new SessionGuard(accounts),UsernamePasswordAuthenticationFilter.class)
                 .csrf(csrf -> csrf.ignoringRequestMatchers(PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, "/poll")))
                 .formLogin(form -> form.loginPage("/login").defaultSuccessUrl("/", true).permitAll())
                 .logout(logout -> logout.logoutSuccessUrl("/login?logout"))

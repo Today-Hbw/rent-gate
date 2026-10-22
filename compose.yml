@@ -5,6 +5,7 @@ services:
       - "8080:8080"
     environment:
       RENT_GATE_ADMIN_PASSWORD: ${RENT_GATE_ADMIN_PASSWORD:?Set RENT_GATE_ADMIN_PASSWORD before starting}
+      RENT_GATE_PUBLIC_BASE_URL: ${RENT_GATE_PUBLIC_BASE_URL:-}
     volumes:
       - device-data:/app/data
     restart: unless-stopped

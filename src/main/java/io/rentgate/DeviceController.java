@@ -19,7 +19,8 @@ public class DeviceController {
     public DeviceController(DeviceService devices) { this.devices = devices; }
 
     public record Create(@NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,64}") String deviceId,
-                         @NotBlank @Size(max = 80) String name) {}
+                         @NotBlank @Size(max = 80) String name, Long userId, Long deviceTypeId) {}
+    public record Update(@NotBlank @Size(max=80) String name,Long userId,@Min(1) long deviceTypeId,boolean enabled) {}
     public record Release(@NotBlank @Size(max = 64) String deviceId,
                           @Min(1) @Max(1440) int durationMin) {}
     public record Target(@NotBlank @Size(max = 64) String deviceId) {}
@@ -38,7 +39,13 @@ public class DeviceController {
 
     @PostMapping("/admin/devices")
     public ResponseEntity<DeviceService.Credentials> create(@Valid @RequestBody Create request) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(devices.create(request.deviceId, request.name));
+        return ResponseEntity.status(HttpStatus.CREATED).body(devices.create(request.deviceId, request.name,request.userId,
+                request.deviceTypeId==null?1:request.deviceTypeId));
+    }
+
+    @PutMapping("/admin/devices/{id}")
+    public DeviceService.Device update(@PathVariable String id,@Valid @RequestBody Update request) {
+        return devices.update(id,request.name,request.userId,request.deviceTypeId,request.enabled);
     }
 
     @PostMapping("/admin/release")
