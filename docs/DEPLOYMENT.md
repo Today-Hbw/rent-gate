@@ -23,15 +23,17 @@ docker build --label org.opencontainers.image.source=https://github.com/Today-Hb
 
 cd "$HOME/apps/rent-gate/config"
 umask 077
-# 只在首次部署时创建；后续更新应保留密码。
-test ! -e .env
-cat > .env <<EOF
+# 只在首次部署时创建；后续更新保留已有文件和密码。
+if [ ! -e .env ]; then
+  (set -C; cat > .env <<EOF
 RENT_GATE_IMAGE=rent-gate:<版本>
 RENT_GATE_HTTP_PORT=8080
 RENT_GATE_ADMIN_PASSWORD=$(openssl rand -hex 16)
 RENT_GATE_DB_PASSWORD=$(openssl rand -hex 24)
 EOF
-chmod 600 .env
+  )
+  chmod 600 .env
+fi
 docker compose -p rent-gate --env-file .env -f compose.yml config --quiet
 docker compose -p rent-gate --env-file .env -f compose.yml up -d
 curl --fail http://127.0.0.1:8080/health

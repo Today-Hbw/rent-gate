@@ -39,10 +39,12 @@
 | JavaScript 与 Python 语法 | 通过 |
 | Chrome 桌面与 390px 手机页面 | 通过，设备卡片、登记、放行、停止、退出及布局已实测；最终控制台无错误/警告 |
 | 真实 HTTP + Python 模拟器断网测试 | 通过；确认 ON 后关闭测试服务，约 1 分钟后本地自动 OFF |
+| 腾讯云 Docker 部署（Java 21） | 通过；容器 healthy，公网健康、登录、设备登记、放行、停止和密钥校验正常 |
+| GitHub Actions | 后端验证与 ESP 固件编译均通过 |
 
 构建产物：`target/rent-gate-0.1.0.jar`、`firmware/.pio/build/esp01_1m/firmware.bin`。构建产物、测试数据与截图不进入 Git。
 
-Docker 配置与 GitHub Actions 已提供；本机未执行容器部署，也未在远端触发 CI。
+已完成独立 Docker 容器部署与公网控制链路验证。服务器访问地址、SSH 信息及实际凭据保存在私有运行环境，未写入仓库。部署与维护方式见 [部署说明](DEPLOYMENT.md)。
 
 ## 实物验收清单（需接入硬件）
 
