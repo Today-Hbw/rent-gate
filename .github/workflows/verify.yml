@@ -15,9 +15,12 @@ jobs:
       - run: ./mvnw -B -ntp verify
       - run: node --check src/main/resources/static/assets/app.js
       - run: node --check src/main/resources/static/assets/guest.js
+      - run: node --check src/main/resources/static/assets/guest-clock.js
+      - run: node --test scripts/guest_clock_test.cjs
       - run: python -m py_compile scripts/simulate_device.py
       - run: g++ -std=c++11 -Wall -Wextra -Werror firmware/test/lease_timer_test.cpp -o /tmp/lease-test && /tmp/lease-test
       - run: g++ -std=c++11 -Wall -Wextra -Werror firmware/test/network_recovery_test.cpp -o /tmp/network-test && /tmp/network-test
+      - run: g++ -std=c++11 -Wall -Wextra -Werror firmware/test/portal_session_test.cpp -o /tmp/portal-test && /tmp/portal-test
   firmware:
     runs-on: ubuntu-latest
     steps:

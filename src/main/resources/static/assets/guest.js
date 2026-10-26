@@ -2,16 +2,20 @@
 const element=id=>document.getElementById(id);
 const token=document.querySelector('meta[name="guest-token"]').content;
 const endpoint=`/api/public/devices/${encodeURIComponent(token)}`;
-let state,csrf,receivedAt=0,connected=false,loading=false,starting=false,selectedPlan=null;
+let state,csrf,connected=false,loading=false,starting=false,selectedPlan=null;
+let resyncCountdown=false;
+const countdown=new GuestCountdown();
 const escapeHtml=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const formatTime=value=>[Math.floor(value/3600),Math.floor(value/60)%60,value%60].map(v=>String(v).padStart(2,'0')).join(':');
 function render() {
   if (!state) return;
-  const elapsed=Math.floor((performance.now()-receivedAt)/1000),now=state.server_ts+elapsed;
-  const remaining=Math.max(0,state.expire_ts-now),cooldown=Math.max(0,state.cooldown_until-now);
+  const now=performance.now(),remaining=countdown.remaining(now),cooldown=countdown.cooldown(now);
   if (remaining===0) element('trial-result').hidden=true;
   element('site-name').textContent=state.site_name; element('device-name').textContent=state.name;
-  element('merchant-name').textContent=state.merchant_name; element('type-name').textContent=state.type_name;
+  element('owner-name').textContent=state.owner_name?'设备归属：'+state.owner_name:state.merchant_name;
+  element('merchant-name').textContent='商户：'+state.merchant_name;
+  element('merchant-name').hidden=!state.owner_name||state.merchant_name===state.owner_name;
+  element('type-name').textContent=state.type_name;
   element('online-badge').textContent=connected?(state.online?'设备在线':'设备离线'):'连接中断';
   element('online-badge').className=`status-pill ${connected&&state.online?'online':''}`;
   element('state-title').textContent=remaining>0?(state.status==='trial'?'正在免费试用':'设备使用中'):cooldown>0?'试用冷却中':'欢迎体验';
@@ -26,7 +30,7 @@ function render() {
   element('guest-notice').textContent=state.guest_notice;
 }
 function applyState(data) {
-  state=data; receivedAt=performance.now(); connected=true; render();
+  countdown.update(data,performance.now(),resyncCountdown);resyncCountdown=false;state=data;connected=true;render();
   const previous=selectedPlan;
   if (!data.plans.some(plan=>plan.id===selectedPlan)) selectedPlan=data.plans[0]?.id??null;
   const signature=JSON.stringify(data.plans);
@@ -57,6 +61,7 @@ async function refresh() {
     connected=false; render();
     if (!state) {
       element('device-name').textContent='暂时无法读取设备'; element('merchant-name').textContent='请确认二维码或联系老板';
+      element('owner-name').textContent='请确认二维码或联系老板';
       element('online-badge').textContent='未连接'; element('state-title').textContent='设备入口暂不可用';
       element('state-note').textContent='网络恢复后会自动重试。'; element('trial-button').textContent='等待连接';
     }
@@ -80,5 +85,5 @@ element('plans').addEventListener('click',event=> {
   selectedPlan=Number(button.dataset.plan);
   element('plans').querySelectorAll('[data-plan]').forEach(plan=>plan.setAttribute('aria-pressed',String(Number(plan.dataset.plan)===selectedPlan)));
 });
-document.addEventListener('visibilitychange',()=>{if (!document.hidden)refresh();});
-refresh(); setInterval(refresh,3000); setInterval(render,1000);
+document.addEventListener('visibilitychange',()=>{if (!document.hidden){resyncCountdown=true;refresh();}});
+refresh(); setInterval(refresh,3000); setInterval(render,250);

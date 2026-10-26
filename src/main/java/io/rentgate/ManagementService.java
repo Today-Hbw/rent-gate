@@ -40,6 +40,7 @@ public class ManagementService {
     }
 
     public DeviceType requireTypeForOwner(long id,AccountService.Account owner,boolean enabled) {
+        lockType(id);
         DeviceType type=type(id);
         if (type.providerId!=null && (owner==null || !type.providerId.equals(owner.providerId()))) throw Db.bad("该设备类型不属于老板所在的服务商");
         if (enabled && !type.enabled) throw Db.bad("设备类型已停用");
@@ -58,12 +59,29 @@ public class ManagementService {
         }
         if (id==null) id=Db.insert(jdbc,"INSERT INTO device_type(name,provider_id,trial_minutes,cooldown_minutes,enabled) VALUES(?,?,?,?,?)",name.strip(),providerId,trialMinutes,cooldownMinutes,enabled);
         else {
+            lockType(id);
             DeviceType old=type(id);
             if (!actor.admin() && !Long.valueOf(actor.id()).equals(old.providerId)) throw Db.missing();
-            if (!java.util.Objects.equals(providerId,old.providerId)) throw Db.bad("设备类型的归属不可变更");
-            jdbc.update("UPDATE device_type SET name=?,trial_minutes=?,cooldown_minutes=?,enabled=? WHERE id=?",name.strip(),trialMinutes,cooldownMinutes,enabled,id);
+            if (!java.util.Objects.equals(providerId,old.providerId) && providerId!=null) {
+                int incompatible=jdbc.queryForObject("SELECT COUNT(*) FROM device d LEFT JOIN sys_user u ON u.id=d.user_id WHERE d.device_type_id=? AND (u.provider_id IS NULL OR u.provider_id<>?)",Integer.class,id,providerId);
+                int plans=jdbc.queryForObject("SELECT COUNT(*) FROM price_plan p JOIN sys_user u ON u.id=p.user_id WHERE p.device_type_id=? AND u.provider_id<>?",Integer.class,id,providerId);
+                if (incompatible>0 || plans>0) throw Db.conflict("该类型存在不属于目标服务商的设备或套餐，请先调整后再修改归属");
+            }
+            jdbc.update("UPDATE device_type SET name=?,provider_id=?,trial_minutes=?,cooldown_minutes=?,enabled=? WHERE id=?",name.strip(),providerId,trialMinutes,cooldownMinutes,enabled,id);
         }
         return type(id);
+    }
+
+    private void lockType(long id) {
+        if (jdbc.queryForList("SELECT id FROM device_type WHERE id=? FOR UPDATE",Long.class,id).isEmpty()) throw Db.missing();
+    }
+    @Transactional public void deleteType(long id) {
+        var actor=accounts.actor();if (actor.owner()) throw Db.forbidden();
+        lockType(id);var type=type(id);
+        if (!actor.admin() && !Long.valueOf(actor.id()).equals(type.providerId)) throw Db.missing();
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM device WHERE device_type_id=?",Integer.class,id)>0) throw Db.conflict("该类型仍有设备使用，不能删除；请先调整设备类型");
+        jdbc.update("DELETE FROM price_plan WHERE device_type_id=?",id);
+        jdbc.update("DELETE FROM device_type WHERE id=?",id);
     }
 
     public List<Merchant> merchants() {

@@ -87,7 +87,7 @@ function deviceRows() {
     `<strong>${esc(d.name)}</strong><small class="mono">${esc(d.device_id)}</small>`,`${esc(d.owner_name||'未分配')}<small>${esc(d.type_name)} · ${esc(d.provider_name||'平台')}</small>`,
     badge(d.online?'在线':'离线',d.online?'green':'')+(!d.enabled?' '+badge('已停用','orange'):'')+`<small>心跳 ${esc(time(d.last_seen_ts))}</small>`,
     badge(d.status==='on'?(d.run_source==='trial'?'试用中':'手动运行'):'待机',d.status==='on'?'green':'')+`<small class="mono">${duration(d.remaining_seconds)}</small><small>继电器回报：${d.relay_on===null?'尚无':d.relay_on?'通电':'断电'}</small>`,
-    `<div class="row-actions">${d.enabled?action('release',d.device_id,'放行'):''}${action('stop',d.device_id,'停止','danger')}${action('edit',d.device_id,'编辑','subtle')}${action('qr',d.device_id,'二维码','subtle')}${action('setup',d.device_id,d.setup_pending?'配网已下发':'进入配网','subtle')}${action('pair',d.device_id,'配对','subtle')}${action('view-key',d.device_id,'查看密钥','subtle')}${action('key',d.device_id,'重设密钥','subtle')}</div>`]));
+    `<div class="row-actions">${d.enabled?action('release',d.device_id,'放行'):''}${action('stop',d.device_id,'停止','danger')}${action('edit',d.device_id,'编辑','subtle')}${action('qr',d.device_id,'二维码','subtle')}${action('setup',d.device_id,d.setup_pending?'配网中':'进入配网','subtle')}${action('close-setup',d.device_id,'结束配网','subtle')}${action('pair',d.device_id,'配对','subtle')}${action('view-key',d.device_id,'查看密钥','subtle')}${action('key',d.device_id,'重设密钥','subtle')}</div>`]));
   if(focused) [...$('device-table').querySelectorAll('[data-action]')].find(b=>b.dataset.action===focusAction&&b.dataset.id===focusId)?.focus({preventScroll:true});
 }
 function renderPage(page,rows) {
@@ -96,7 +96,7 @@ function renderPage(page,rows) {
     `<strong>${esc(a.display_name)}</strong><small>${esc(a.username)}</small>`,`${esc(roleName[a.role])}<small>${esc(a.provider_name||'—')}</small>`,badge(a.enabled?'启用':'停用',a.enabled?'green':'orange'),
     a.role!=='admin'&&a.id!==state.me.id?`<div class="row-actions">${action('edit',a.id,'编辑')}${action('password',a.id,'重置密码','subtle')}</div>`:'—'])));
   if(page==='types') html=card('类型与试用规则','试用分钟数设为 0 可关闭该类型试用。冷却从本次试用的计划结束时间开始。',table(['类型','归属','免费试用','冷却','状态','操作'],rows.map(t=>[
-    `<strong>${esc(t.name)}</strong>`,esc(t.provider_name||'平台通用'),t.trial_minutes+' 分钟',t.cooldown_minutes+' 分钟',badge(t.enabled?'启用':'停用',t.enabled?'green':'orange'),state.me.role==='admin'||state.me.role==='provider'&&t.provider_id===state.me.id?action('edit',t.id,'编辑'):'只读'])));
+    `<strong>${esc(t.name)}</strong>`,esc(t.provider_name||'平台通用'),t.trial_minutes+' 分钟',t.cooldown_minutes+' 分钟',badge(t.enabled?'启用':'停用',t.enabled?'green':'orange'),state.me.role==='admin'||state.me.role==='provider'&&t.provider_id===state.me.id?`<div class="row-actions">${action('edit',t.id,'编辑')}${action('delete-type',t.id,'删除','danger')}</div>`:'只读'])));
   if(page==='merchants') html=card('商户资料','商户号仅保存业务资料；不保存支付私钥，不会发起支付或进件。',table(['商户','账号 / 类型','微信商户号','支付宝 APP ID','操作'],rows.map(m=>[
     `<strong>${esc(m.name)}</strong>`,`${esc(m.owner_name)}<small>${m.mch_type==='provider'?'服务商普通商户':'老板小微商户'}</small>`,esc((m.mch_type==='provider'?m.wechat_mch_id:m.wechat_sub_mch_id)||'未填写'),esc(m.alipay_app_id||'未填写'),action('edit',m.id,'编辑')])));
   if(page==='plans') html=card('套餐列表','套餐只对归属老板和对应设备类型生效。停用后客人页面不再展示。',table(['套餐','归属 / 类型','时长','价格','状态','操作'],rows.map(p=>[
@@ -130,7 +130,7 @@ function field(name,label,value='',options={}) {
 }
 const providers=()=>state.accounts.filter(a=>a.role==='provider').map(a=>[a.id,a.display_name]);
 const owners=()=>state.accounts.filter(a=>a.role==='user').map(a=>[a.id,a.display_name]);
-function ownerField(value,disabled=false,unassigned=false) { return field('user_id','所属老板',value??'',{disabled:disabled||state.me.role==='user',options:[...(unassigned?[['','未分配（无法扫码试用）']]:[]),...owners()]}); }
+function ownerField(value,disabled=false,unassigned=false) { return field('user_id','所属老板',value??'',{disabled:disabled||state.me.role==='user',required:!unassigned,options:[...(unassigned?[['','未分配（无法扫码试用）']]:[]),...owners()]}); }
 let editorSave;
 async function edit(row=null,kind=state.page) {
   try { await lookups(); }catch(e){error(e.message);return;}
@@ -148,7 +148,7 @@ async function edit(row=null,kind=state.page) {
     save=v=>api('/admin/accounts/'+row.id+'/password','POST',v);
   } else if(kind==='types') {
     title=isNew?'添加设备类型':'编辑设备类型';
-    fields=field('name','类型名称',row?.name||'')+field('provider_id','所属服务商',row?.provider_id??(state.me.role==='provider'?state.me.id:''),{disabled:!isNew||state.me.role==='provider',options:[...(state.me.role==='admin'?[['','平台通用']]:[]),...providers()]})+field('trial_minutes','免费试用（分钟）',row?.trial_minutes??15,{type:'number',min:0,max:1440})+field('cooldown_minutes','试用结束后冷却（分钟）',row?.cooldown_minutes??120,{type:'number',min:0,max:10080})+field('enabled','启用类型',row?.enabled??true,{check:true});
+    fields=field('name','类型名称',row?.name||'')+field('provider_id','所属服务商',row?.provider_id??(state.me.role==='provider'?state.me.id:''),{disabled:state.me.role==='provider',required:state.me.role!=='admin',options:[...(state.me.role==='admin'?[['','平台通用']]:[]),...providers()]})+field('trial_minutes','免费试用（分钟）',row?.trial_minutes??15,{type:'number',min:0,max:1440})+field('cooldown_minutes','试用结束后冷却（分钟）',row?.cooldown_minutes??120,{type:'number',min:0,max:10080})+field('enabled','启用类型',row?.enabled??true,{check:true});
     save=v=>api('/admin/device-types'+(isNew?'':'/'+row.id),isNew?'POST':'PUT',{...v,provider_id:v.provider_id?Number(v.provider_id):null,trial_minutes:Number(v.trial_minutes),cooldown_minutes:Number(v.cooldown_minutes)});
   } else if(kind==='merchants') {
     title='编辑商户资料'; fields=field('name','商户名称',row.name)+field(row.mch_type==='provider'?'wechat_mch_id':'wechat_sub_mch_id',row.mch_type==='provider'?'微信普通商户号':'微信小微商户号',row.mch_type==='provider'?row.wechat_mch_id:row.wechat_sub_mch_id,{max:32,pattern:'[0-9]{0,32}',required:false})+field('alipay_app_id','支付宝 APP ID',row.alipay_app_id,{max:32,pattern:'[0-9]{0,32}',required:false});
@@ -173,7 +173,7 @@ $('editor-form').addEventListener('submit',async e=>{
 function confirmAction(message) { return new Promise(resolve=>{const dialog=$('confirmation');$('confirmation-text').textContent=message;dialog.returnValue='';dialog.addEventListener('close',()=>resolve(dialog.returnValue==='confirm'),{once:true});dialog.showModal();}); }
 function showCredentials(value) {
   $('credential-id').value=value.device_id;$('credential-key').value=value.device_key||'';
-  $('credential-note').textContent=value.device_key?'可复制密钥手动填写，也可在配网页留空密钥，通过后台配对自动写入。':'旧设备只保存了密钥摘要。设备成功连接一次后即可查看；也可重新配对或重设密钥。';
+  $('credential-note').textContent=value.device_key?'可复制密钥手动填写，也可通过后台生成配对验证码，在设备配网页自动获取设备号和密钥。':'旧设备只保存了密钥摘要。设备成功连接一次后即可查看；也可重新配对或重设密钥。';
   $('copy-key').disabled=!value.device_key;$('credentials').showModal();
 }
 $('credentials').addEventListener('close',()=>{$('credential-key').value='';});
@@ -182,6 +182,10 @@ async function rowAction(name,id) {
   const row=state.rows.find(r=>String(r.device_id??r.id)===id);
   if(!row) return;
   if(name==='edit'||name==='password') {await edit(row,name==='password'?'password':state.page);return;}
+  if(name==='delete-type') {
+    if(!await confirmAction('删除类型“'+row.name+'”？有任何设备使用时不能删除；删除成功时，该类型的时长套餐也会删除。'))return;
+    await api('/admin/device-types/'+encodeURIComponent(id),'DELETE');toast('类型已删除');await lookups();await load();return;
+  }
   if(name==='view-key') {showCredentials(await api('/admin/devices/'+encodeURIComponent(id)+'/credentials'));return;}
   if(name==='setup') {
     if(!await confirmAction('让 '+row.name+' 进入配网？设备须处于待机。热点密码 RentGate888，连接后打开 http://192.168.4.1 修改配置。'))return;
@@ -189,8 +193,12 @@ async function rowAction(name,id) {
     toast('配网已下发，请连接设备热点 RentGate-xxxxxx');
   }
   if(name==='pair') {
-    await api('/admin/devices/'+encodeURIComponent(id)+'/pairing','POST');
-    $('pair-device-id').value=id;$('pair-code').value='';$('pair-error').textContent='';$('pair-dialog').showModal();return;
+    const value=await api('/admin/devices/'+encodeURIComponent(id)+'/pairing-code','POST');
+    $('pair-device-id').value=id;$('pair-code').value=value.code;$('pair-expiry').textContent='有效至 '+time(value.expires_ts)+'；再次生成会使旧验证码失效。';$('pair-dialog').showModal();return;
+  }
+  if(name==='close-setup') {
+    if(!await confirmAction('结束 '+row.name+' 的配网？未保存的修改将取消，设备恢复原配置。离线时会等待重新连接。'))return;
+    await api('/admin/devices/'+encodeURIComponent(id)+'/setup/close','POST');toast('结束配网指令已下发');
   }
   if(name==='qr') {
     const link=await api('/admin/devices/'+encodeURIComponent(id)+'/guest-link');$('qr-title').textContent=row.name+' · '+id;$('qr-link').value=link.url;$('qr-open').href=link.url;
@@ -203,18 +211,15 @@ async function rowAction(name,id) {
     await api('/admin/release','POST',{device_id:id,duration_min:minutes});toast('放行已下发，等待设备轮询');
   }
   if(name==='stop') {if(!await confirmAction('确认停止 '+row.name+'？设备会在下一次轮询时断电。'))return;await api('/admin/stop','POST',{device_id:id});toast('停止指令已下发');}
-  if(name==='key') {if(!await confirmAction('重设后旧密钥立即失效，设备需要重新填写密钥才能连接。确认继续？'))return;showCredentials(await api('/admin/rotate-key','POST',{device_id:id}));}
+  if(name==='key') {if(!await confirmAction('重设后旧密钥立即失效，不会自动下发新密钥。请在设备上手动填写新密钥，或使用新的配对验证码更新配置。确认继续？'))return;showCredentials(await api('/admin/rotate-key','POST',{device_id:id}));}
   await load(true);
 }
 $('content').addEventListener('click',e=>{const button=e.target.closest('[data-action]');if(!button||button.disabled)return;button.disabled=true;rowAction(button.dataset.action,button.dataset.id).catch(e=>error(e.message)).finally(()=>button.disabled=false);});
 document.addEventListener('click',e=>{const close=e.target.closest('[data-close]');if(close)$(close.dataset.close).close();});
 $('copy-key').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('credential-key').value);toast('密钥已复制');}catch{$('credential-key').select();toast('请手动复制选中的密钥');}});
-$('pair-form').addEventListener('submit',async e=>{
-  e.preventDefault();const button=e.target.querySelector('[type=submit]');button.disabled=true;$('pair-error').textContent='';
-  try {
-    await api('/admin/devices/'+encodeURIComponent($('pair-device-id').value)+'/pairing/confirm','POST',{code:$('pair-code').value.trim()});
-    $('pair-dialog').close();toast('配对已确认，设备将自动保存密钥并恢复连接');await load(true);
-  }catch(err){$('pair-error').textContent=err.message;}finally{button.disabled=false;}
+$('copy-pair-code').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('pair-code').value);toast('验证码已复制');}catch{$('pair-code').select();toast('请复制选中的验证码');}});
+$('cancel-pairing').addEventListener('click',async()=>{
+  try{await api('/admin/devices/'+encodeURIComponent($('pair-device-id').value)+'/pairing','DELETE');$('pair-dialog').close();toast('本次配对验证码已作废');}catch(err){error(err.message);}
 });
 $('help').addEventListener('click',()=>$('help-dialog').showModal());
 $('create').addEventListener('click',()=>edit());

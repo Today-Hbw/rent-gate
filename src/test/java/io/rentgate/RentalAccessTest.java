@@ -85,11 +85,54 @@ class RentalAccessTest {
         assertThat(devices.guest("public-a").trialAvailable()).isTrue();
     }
 
+    @Test void adminCanMoveTypeBetweenCommonAndCompatibleProviderButCannotBreakExistingDevices() throws Exception {
+        long type=management.saveType(null,"通用可调整",null,1,0,true).id();
+        assertThat(management.saveType(type,"服务商类型",providerA,1,0,true).providerId()).isEqualTo(providerA);
+        devices.update("device-a","一号桌",ownerA,type,true);
+        mvc.perform(put("/admin/device-types/"+type).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"错误归属\",\"provider_id\":"+providerB+",\"trial_minutes\":1,\"cooldown_minutes\":0,\"enabled\":true}"))
+                .andExpect(status().isConflict());
+        mvc.perform(put("/admin/device-types/"+type).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"平台通用\",\"provider_id\":null,\"trial_minutes\":1,\"cooldown_minutes\":0,\"enabled\":true}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.provider_id").isEmpty());
+    }
+
+    @Test void deleteTypeRejectsAttachedDevicesAndRemovesUnusedTypeWithItsPlans() throws Exception {
+        mvc.perform(delete("/admin/device-types/1").with(csrf())).andExpect(status().isConflict());
+        org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(
+                new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("admin","",java.util.List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_ADMIN"))));
+        long type=management.saveType(null,"待删除类型",providerA,1,0,true).id();
+        management.savePlan(null,ownerA,type,"随类型删除的套餐",1,new java.math.BigDecimal("1.00"),true);
+        mvc.perform(delete("/admin/device-types/"+type).with(user("provider_b").roles("PROVIDER")).with(csrf())).andExpect(status().isNotFound());
+        mvc.perform(delete("/admin/device-types/"+type).with(user("owner_a").roles("USER")).with(csrf())).andExpect(status().isForbidden());
+        mvc.perform(delete("/admin/device-types/"+type).with(user("provider_a").roles("PROVIDER")).with(csrf())).andExpect(status().isOk());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM device_type WHERE id=?",Integer.class,type)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM price_plan WHERE device_type_id=?",Integer.class,type)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM device WHERE device_type_id=1",Integer.class)).isEqualTo(2);
+    }
+
+    @Test void existingQrReflectsCurrentOwnerAndDefaultMerchantNameWithoutReplacingCustomShopNames() {
+        accounts.update(ownerA,"老板甲改名",true);
+        var renamed=devices.guest("public-a");
+        assertThat(renamed.ownerName()).isEqualTo("老板甲改名");
+        assertThat(renamed.merchantName()).isEqualTo("老板甲改名");
+        long merchant=jdbc.queryForObject("SELECT id FROM merchant WHERE user_id=?",Long.class,ownerA);
+        management.saveMerchant(merchant,"自定义门店","","","");
+        accounts.update(ownerA,"老板甲再次改名",true);
+        var custom=devices.guest("public-a");
+        assertThat(custom.ownerName()).isEqualTo("老板甲再次改名");
+        assertThat(custom.merchantName()).isEqualTo("自定义门店");
+        devices.update("device-a","一号桌",ownerB,1,true);
+        var reassigned=devices.guest("public-a");
+        assertThat(reassigned.ownerName()).isEqualTo("老板乙");
+        assertThat(reassigned.merchantName()).isEqualTo("老板乙");
+    }
+
     @Test void ownerAndProviderOnlySeeTheirOwnDevicesAndCannotControlOtherDevices() throws Exception {
         for (String role:new String[]{"owner_a","provider_a"}) {
             mvc.perform(get("/admin/devices/device-b/credentials").with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER"))).andExpect(status().isNotFound());
             mvc.perform(get("/admin/devices/device-a/credentials").with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER"))).andExpect(status().isOk()).andExpect(jsonPath("$.device_key").value(keyA));
-            for(String endpoint:new String[]{"setup","pairing","pairing/confirm"}) mvc.perform(post("/admin/devices/device-b/"+endpoint).with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER")).with(csrf())
+            for(String endpoint:new String[]{"setup","setup/close","pairing","pairing-code","pairing/confirm"}) mvc.perform(post("/admin/devices/device-b/"+endpoint).with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER")).with(csrf())
                     .contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"123456\"}")).andExpect(status().isNotFound());
             mvc.perform(get("/admin/devices").with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER")))
                     .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1)).andExpect(jsonPath("$[0].device_id").value("device-a"));

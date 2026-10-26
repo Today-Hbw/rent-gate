@@ -19,6 +19,7 @@ public class ManagementController {
     @GetMapping("/admin/device-types") public List<ManagementService.DeviceType> types() { return management.types(); }
     @PostMapping("/admin/device-types") public ManagementService.DeviceType createType(@Valid @RequestBody Type input) { return saveType(null,input); }
     @PutMapping("/admin/device-types/{id}") public ManagementService.DeviceType updateType(@PathVariable long id,@Valid @RequestBody Type input) { return saveType(id,input); }
+    @DeleteMapping("/admin/device-types/{id}") public java.util.Map<String,String> deleteType(@PathVariable long id) { management.deleteType(id);return java.util.Map.of("status","deleted"); }
     private ManagementService.DeviceType saveType(Long id,Type input) { return management.saveType(id,input.name,input.providerId,input.trialMinutes,input.cooldownMinutes,input.enabled); }
     @GetMapping("/admin/merchants") public List<ManagementService.Merchant> merchants() { return management.merchants(); }
     @PutMapping("/admin/merchants/{id}") public ManagementService.Merchant saveMerchant(@PathVariable long id,@Valid @RequestBody Merchant input) { return management.saveMerchant(id,input.name,input.wechatMchId,input.wechatSubMchId,input.alipayAppId); }

@@ -28,14 +28,14 @@ GET `/login` 取得表单，POST `/login` 提交 username、password 与表单 C
 | 方法 | 路径 | 入参 / 作用 |
 | --- | --- | --- |
 | GET | `/admin/device-types` | 可见通用/服务商类型 |
-| POST / PUT | `/admin/device-types` / `/admin/device-types/{id}` | name, provider_id, trial_minutes, cooldown_minutes, enabled |
+| POST / PUT / DELETE | `/admin/device-types` / `/admin/device-types/{id}` | name, provider_id, trial_minutes, cooldown_minutes, enabled |
 | GET | `/admin/merchants` | 可见商户资料 |
 | PUT | `/admin/merchants/{id}` | name, wechat_mch_id, wechat_sub_mch_id, alipay_app_id |
 | GET | `/admin/plans` | 可见套餐 |
 | POST / PUT | `/admin/plans` / `/admin/plans/{id}` | user_id, device_type_id, name, duration_min, price, enabled |
 | GET / PUT | `/admin/settings` | site_name, guest_notice, online_timeout_seconds；仅管理员写 |
 
-名称非空且最多 80 字符。试用 0–1440 分钟，0 表示关闭；冷却 0–10080。provider_id=null 表示平台通用类型，仅管理员可编辑。服务商维护自己类型，归属不可更改。
+名称非空且最多 80 字符。试用 0–1440 分钟，0 表示关闭；冷却 0–10080。provider_id=null 表示平台通用类型，仅管理员可编辑。服务商维护自己类型；管理员可修改归属，已有设备/套餐必须兼容新的服务商范围。DELETE 要求无任何关联设备，成功时一并删除该类型套餐。
 
 创建账号自动创建对应商户。商户号与 APP ID 为最多 32 位数字，可传空字符串；服务商填 wechat_mch_id，老板填 wechat_sub_mch_id，另一个必须空。不接收支付私钥/证书。
 
@@ -55,6 +55,9 @@ online_timeout_seconds 为 6–300，默认 12；guest_notice 最多 240 字符�
 | POST | `/admin/rotate-key` | device_id；返回新密钥，撤销旧密钥和配对窗口 |
 | GET | `/admin/devices/{id}/credentials` | 权限内设备密钥，Cache-Control: no-store；旧设备未回连时 device_key=null |
 | POST | `/admin/devices/{id}/setup` | 待机、在线且支持新协议；返回 request_id,expires_ts，有效期 5 分钟 |
+| POST | `/admin/devices/{id}/pairing-code` | 返回 code（8 位数字）和 expires_ts，5 分钟有效，新码撤销旧码 |
+| DELETE | `/admin/devices/{id}/pairing` | 作废配对窗口和验证码 |
+| POST | `/admin/devices/{id}/setup/close` | v0.3.0+，下发后台结束配网命令 |
 | POST | `/admin/devices/{id}/pairing` | 开启/恢复 5 分钟配对窗口，返回 status,expires_ts |
 | POST | `/admin/devices/{id}/pairing/confirm` | code：6 位数字；确认后生成新密钥，最多输错 5 次 |
 | GET | `/admin/devices/{id}/guest-link` | `{"url":"https://…/r/<public_token>"}` |
@@ -116,7 +119,15 @@ GET `/admin/statistics` 返回 total_devices、online_devices、running_devices�
 
 v0.2.0 请求另带 `firmware_version="0.2.0"`，以及上次完成配网的 `config_ack`（UUID，可省略）。响应另带 `config_request_id`（无命令为 null），同一命令重复下发直至匹配确认或 5 分钟过期；配网完成后的首次轮询发送确认。旧固件忽略新增字段仍兼容，但不可通过后台触发配网。
 
-## 免手填密钥配对
+## v0.3.0 数字验证码配对
+
+POST `/device/enroll` 无需 Session/CSRF，请求 code（8 位数字）、token（设备保存的 43 字符随机令牌）、hardware_id（12 位 MAC 十六进制）。成功返回 device_id、device_key，禁止缓存。验证码 5 分钟有效，首次成功只绑定本次令牌与硬件标识；同一设备可重试取回相同密钥，其他请求拒绝。同一 IP 5 分钟内最多 20 次失败，超限 429；无效、过期和已被其他设备使用均统一 401。后台重设密钥立即撤销旧密钥并删除窗口，不能凭旧令牌领回新密钥。
+
+轮询另带 config_active、config_close_ack；响应 config_close_id，下发结束配网命令，匹配确认后撤销。配网期间继续认证轮询以接收结束指令，固件不会在配置中执行新的通电指令。本地真实操作续期，状态查询不续期，180 秒无操作退出。
+
+公开设备响应另含 owner_name，表示当前归属账号的显示名称；merchant_name 保留独立门店名。
+
+## v0.2.0 旧固件配对兼容接口
 
 固件留空密钥后每 3 秒 POST `/device/pair`，无需 Session/CSRF。请求 `{"device_id":"…","token":"…"}`；token 为设备产生并保存在 LittleFS 的 43 字符随机令牌，字符集 `[A-Za-z0-9_-]`。响应 `status` 为 waiting（未开启/过期）、pending（等待确认）、busy（窗口已绑定其他令牌）、approved（已确认），另有 pairing_code、device_key、expires_ts；未确认绝不返回密钥。只有匹配窗口令牌且授权后台确认短码后，才在该窗口有效期内返回新密钥，重复取回不再换钥。所有配对响应禁止缓存。
 

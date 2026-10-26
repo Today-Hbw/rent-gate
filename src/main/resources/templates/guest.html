@@ -4,13 +4,13 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="guest-token" th:content="${guestToken}"><meta name="theme-color" content="#147d68">
   <title>扫码使用设备 · Rent Gate</title><link rel="icon" href="/assets/icon.svg">
-  <link rel="stylesheet" href="/assets/guest.css"><script src="/assets/guest.js" defer></script>
+  <link rel="stylesheet" href="/assets/guest.css"><script src="/assets/guest-clock.js" defer></script><script src="/assets/guest.js" defer></script>
 </head>
 <body>
 <main class="guest-shell">
   <header class="guest-header"><span class="guest-brand"><img src="/assets/icon.svg" alt="" width="28" height="28"><span id="site-name">Rent Gate</span></span><span class="guest-label">扫码即用</span></header>
   <p class="eyebrow">WELCOME · 轻松开始一局</p>
-  <h1 id="device-name">正在连接设备…</h1><p id="merchant-name" class="muted">正在读取设备信息</p>
+  <h1 id="device-name">正在连接设备…</h1><p id="owner-name" class="muted">正在读取设备归属</p><p id="merchant-name" class="muted" hidden></p>
   <div id="guest-error" class="message error" role="alert" hidden></div>
   <section class="machine-card" aria-label="设备使用状态">
     <div class="card-top"><span id="type-name">设备</span><span id="online-badge" class="status-pill">连接中</span></div>

@@ -10,6 +10,8 @@ extern "C" {
 }
 #include "LeaseTimer.h"
 #include "NetworkRecovery.h"
+#include "PortalSession.h"
+#include "PortalUi.h"
 
 #ifndef RELAY_PIN
 #define RELAY_PIN 0
@@ -18,31 +20,33 @@ extern "C" {
 #define RELAY_ACTIVE_LEVEL LOW
 #endif
 
-static char serverUrl[121] = "";
+static char serverUrl[121] = "http://162.14.76.232:8080";
 static char deviceId[65] = "";
 static char deviceKey[65] = "";
 static char pairingToken[44] = "";
-static char pairingCode[7] = "";
-static const char* pairingStatus = "waiting";
+static char enrollmentCode[9] = "";
+static char enrollmentServer[121] = "";
+static bool enrollmentFailed = false;
 static char configAck[37] = "";
+static char configCloseAck[37] = "";
+static String previousSsid, previousPassword;
+static const char* portalMessage = "填写 WiFi 和后台生成的验证码即可配对；不填验证码时，请完整填写手动配置。";
 static WiFiManager wifi;
 static WiFiManagerParameter serverParam("server", "服务器 HTTP 地址（如 http://192.168.1.10:8080）", "", 120);
+static WiFiManagerParameter codeParam("code", "配对验证码（后台生成的 8 位数字；手动配置时留空）", "", 8, "inputmode=\"numeric\" autocomplete=\"off\"");
 static WiFiManagerParameter idParam("device", "设备编号", "", 64);
-static WiFiManagerParameter keyParam("key", "设备密钥（可选，留空后在管理后台配对）", "", 64, "type=\"password\"");
+static WiFiManagerParameter keyParam("key", "设备密钥（手动配置时填写；验证码配对可留空）", "", 64, "type=\"password\"");
 static WiFiManagerParameter pairingHelp(
-    "<div id='pairing-info'>密钥可留空。保存 WiFi、服务器地址和设备编号后，在管理后台点击“配对”，再回到此页面查看 6 位配对码。</div>"
-    "<script>setInterval(function(){fetch('/pairing-status').then(r=>r.json()).then(s=>{"
-    "document.getElementById('pairing-info').textContent=s.code?'配对码：'+s.code+'（窗口有效期 5 分钟）。请在管理后台输入并确认。':"
-    "s.status==='busy'?'其他设备正在请求配对，请在窗口过期后重新配对。':"
-    "s.status==='saved'?'配对已保存，请将手机切回可上网的网络。':'等待配对：请先留空密钥保存配置，再到管理后台点击“配对”。';"
-    "}).catch(()=>{});},2000);</script>");
+    "<p>填写验证码时会自动获取设备编号和密钥；不填验证码时，使用下方完整手动配置。所有配置项均可修改。</p>");
 static constexpr char setupPassword[] = "RentGate888";
 static Ticker cutoff;
 static LeaseTimer lease;
 static NetworkRecovery networkRecovery;
+static PortalSession portalSession;
 static volatile bool relayOn = false;
 static bool shouldSave = false;
 static bool needsSetup = false;
+static bool closeRequested = false, restoreOnClose = true, saveWaitingForWifi = false;
 static bool fsReady = false;
 static uint32_t lastPoll = 0;
 
@@ -52,11 +56,20 @@ static void relayOff() {
   relayOn = false;
 }
 
-static bool validConfig(const char* server, const char* id, const char* key) {
+static bool validServer(const char* server) {
   String url(server);
   if (!url.startsWith("http://") || url.length() <= 7 || url.length() > 120) return false;
   // No query/fragment/userinfo: all credentials travel only in the header.
   if (url.indexOf('?') >= 0 || url.indexOf('#') >= 0 || url.indexOf('@') >= 0 || url.indexOf(' ') >= 0) return false;
+  return true;
+}
+static bool validCode(const char* code) {
+  if (strlen(code) != 8) return false;
+  for (size_t i = 0; i < 8; ++i) if (code[i] < '0' || code[i] > '9') return false;
+  return true;
+}
+static bool validConfig(const char* server, const char* id, const char* key) {
+  if (!validServer(server)) return false;
   size_t length = strlen(id);
   if (!length || length > 64 || (strlen(key) != 0 && strlen(key) != 43)) return false;
   for (size_t i = 0; i < length; ++i) {
@@ -88,8 +101,21 @@ static void newPairingToken() {
   static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
   for (size_t i = 0; i < sizeof(pairingToken) - 1; ++i) pairingToken[i] = alphabet[os_random() & 63];
   pairingToken[43] = '\0';
-  pairingCode[0] = '\0';
-  pairingStatus = "waiting";
+}
+
+static void loadEnrollment() {
+  if (!fsReady) return;
+  File file = LittleFS.open("/pending.json", "r");
+  if (!file) return;
+  StaticJsonDocument<384> doc;
+  if (deserializeJson(doc, file)) return;
+  const char* server = doc["server"] | "";
+  const char* code = doc["code"] | "";
+  const char* token = doc["token"] | "";
+  if (!validServer(server) || !validCode(code) || strlen(token) != 43) return;
+  strlcpy(enrollmentServer, server, sizeof(enrollmentServer));
+  strlcpy(enrollmentCode, code, sizeof(enrollmentCode));
+  strlcpy(pairingToken, token, sizeof(pairingToken));
 }
 
 static bool writeConfig(const char* server, const char* id, const char* key, const char* token) {
@@ -103,38 +129,91 @@ static bool writeConfig(const char* server, const char* id, const char* key, con
   return true;
 }
 
+static void clearEnrollment() {
+  enrollmentCode[0] = '\0'; enrollmentServer[0] = '\0'; pairingToken[0] = '\0';
+  enrollmentFailed = false; codeParam.setValue("", 8);
+  if (fsReady && LittleFS.exists("/pending.json")) LittleFS.remove("/pending.json");
+}
+
 static bool saveConfig() {
   shouldSave = false;
   const char* server = serverParam.getValue();
   const char* id = idParam.getValue();
   const char* key = keyParam.getValue();
-  if (!validConfig(server, id, key)) {
-    Serial.println("Invalid config. Correct HTTP URL, device ID and optional 43-character key in phone setup.");
-    wifi.setTitle("RentGate - Invalid settings; correct and save again");
+  const char* code = codeParam.getValue();
+  bool byCode = *code;
+  if (!validServer(server) || (byCode ? !validCode(code) : (!validConfig(server, id, key) || strlen(key) != 43))) {
+    portalMessage = "配置有误：填写有效 HTTP 地址和 8 位验证码，或留空验证码并完整填写设备编号、43 字符密钥。";
+    saveWaitingForWifi = false;
     return false;
   }
-  if (!*key && (!*pairingToken || strcmp(id, deviceId) != 0 || *deviceKey)) newPairingToken();
-  if (*key) { pairingToken[0] = '\0'; pairingCode[0] = '\0'; }
-  if (!writeConfig(server, id, key, pairingToken)) return false;
+  if (WiFi.status() != WL_CONNECTED) {
+    saveWaitingForWifi = true;
+    portalMessage = "WiFi 尚未连接成功，请检查 WiFi 名称和密码。可以返回配置修改，或取消退出。";
+    return false;
+  }
+  saveWaitingForWifi = false;
+  if (byCode) {
+    if (!*pairingToken || strcmp(code, enrollmentCode) != 0 || strcmp(server, enrollmentServer) != 0) newPairingToken();
+    if (!fsReady) { portalMessage = "存储不可用，配置未保存。"; return false; }
+    StaticJsonDocument<384> doc;
+    doc["server"] = server; doc["code"] = code; doc["token"] = pairingToken;
+    File file = LittleFS.open("/pending.tmp", "w");
+    if (!file || !serializeJson(doc, file)) { portalMessage = "保存失败，请重试。"; return false; }
+    file.close();
+    if (!LittleFS.rename("/pending.tmp", "/pending.json")) { portalMessage = "保存失败，请重试。"; return false; }
+    strlcpy(enrollmentServer, server, sizeof(enrollmentServer));
+    while (strlen(enrollmentServer) > 7 && enrollmentServer[strlen(enrollmentServer) - 1] == '/') enrollmentServer[strlen(enrollmentServer) - 1] = '\0';
+    strlcpy(enrollmentCode, code, sizeof(enrollmentCode));
+    enrollmentFailed = false;
+    portalMessage = "WiFi 已连接，正在验证验证码并自动获取设备编号和密钥…";
+    lastPoll = millis() - 3000;
+    return true;
+  }
+  if (!writeConfig(server, id, key, "")) { portalMessage = "保存失败，请重试。"; return false; }
   strlcpy(serverUrl, server, sizeof(serverUrl));
   while (strlen(serverUrl) > 7 && serverUrl[strlen(serverUrl) - 1] == '/') serverUrl[strlen(serverUrl) - 1] = '\0';
   strlcpy(deviceId, id, sizeof(deviceId));
   strlcpy(deviceKey, key, sizeof(deviceKey));
+  clearEnrollment();
+  closeRequested = true; restoreOnClose = false;
   wifi.setTitle("RentGate setup");
   Serial.println("Config saved. Credentials are not printed.");
   return true;
 }
 
 static void startPortal() {
-  if (wifi.getConfigPortalActive()) return;
+  if (wifi.getConfigPortalActive() || !portalSession.canOpen(millis())) return;
+  previousSsid = WiFi.SSID(); previousPassword = WiFi.psk();
   char name[28];
   snprintf(name, sizeof(name), "RentGate-%06X", ESP.getChipId());
   Serial.printf("Setup AP: %s | open http://192.168.4.1 on your phone\n", name);
   wifi.startConfigPortal(name, setupPassword);
+  if (wifi.getConfigPortalActive()) portalSession.opened(millis());
+}
+
+static void closePortal(bool restore) {
+  closeRequested = false; shouldSave = false; saveWaitingForWifi = false; needsSetup = false;
+  bool active = wifi.getConfigPortalActive();
+  if (active) wifi.stopConfigPortal();
+  if (restore) {
+    clearEnrollment();
+    if (active && previousSsid.length() && (previousSsid != WiFi.SSID() || previousPassword != WiFi.psk())) {
+      WiFi.persistent(true);
+      WiFi.begin(previousSsid.c_str(), previousPassword.c_str());
+      WiFi.persistent(false);
+    }
+    serverParam.setValue(serverUrl, 120); idParam.setValue(deviceId, 64); keyParam.setValue(deviceKey, 64);
+  }
+  portalSession.closed(millis());
+  WiFi.setAutoReconnect(true);
+  if (WiFi.status() != WL_CONNECTED) WiFi.begin();
+  lastPoll = millis() - 3000;
+  portalMessage = "填写 WiFi 和后台生成的验证码即可配对；不填验证码时，请完整填写手动配置。";
 }
 
 static void maintainNetwork() {
-  bool configured = validConfig(serverUrl, deviceId, deviceKey) && strlen(deviceKey) == 43;
+  bool configured = validConfig(serverUrl, deviceId, deviceKey) && strlen(deviceKey) == 43 && !*enrollmentCode;
   // With no saved SSID there is nothing to wait for on first boot.
   bool hasSavedWifi = WiFi.SSID().length() > 0;
   NetworkRecovery::Action action = networkRecovery.update(
@@ -145,9 +224,7 @@ static void maintainNetwork() {
       startPortal();
       break;
     case NetworkRecovery::Action::StopPortal:
-      wifi.stopConfigPortal();
-      WiFi.setAutoReconnect(true);
-      lastPoll = millis() - 3000;
+      closePortal(false);
       break;
     case NetworkRecovery::Action::RetryWifi:
       // WiFiManager disables STA when opening an offline portal. Re-enable it
@@ -160,52 +237,54 @@ static void maintainNetwork() {
 }
 
 static void pollPairing() {
-  if (WiFi.status() != WL_CONNECTED || *deviceKey || !validConfig(serverUrl, deviceId, deviceKey)) return;
-  if (!*pairingToken) {
-    newPairingToken();
-    if (!writeConfig(serverUrl, deviceId, deviceKey, pairingToken)) return;
-  }
+  if (WiFi.status() != WL_CONNECTED || !validCode(enrollmentCode) || !*pairingToken || enrollmentFailed) return;
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(1500);
-  if (!http.begin(client, String(serverUrl) + "/device/pair")) return;
+  if (!http.begin(client, String(enrollmentServer) + "/device/enroll")) return;
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<192> request;
-  request["device_id"] = deviceId; request["token"] = pairingToken;
+  request["code"] = enrollmentCode; request["token"] = pairingToken;
+  String hardware = WiFi.macAddress(); hardware.replace(":", ""); request["hardware_id"] = hardware;
   String body; serializeJson(request, body);
-  if (http.POST(body) == HTTP_CODE_OK && http.getSize() <= 512) {
+  int result = http.POST(body);
+  if (result == HTTP_CODE_OK && http.getSize() <= 512) {
     StaticJsonDocument<512> response;
     if (!deserializeJson(response, http.getString())) {
-      const char* status = response["status"] | "waiting";
-      const char* code = response["pairing_code"] | "";
-      strlcpy(pairingCode, strlen(code) == 6 ? code : "", sizeof(pairingCode));
-      pairingStatus = strcmp(status, "busy") == 0 ? "busy" : "waiting";
+      const char* id = response["device_id"] | "";
       const char* key = response["device_key"] | "";
-      if (strcmp(status, "approved") == 0 && strlen(key) == 43 && writeConfig(serverUrl, deviceId, key, "")) {
+      if (validConfig(enrollmentServer, id, key) && strlen(key) == 43 && writeConfig(enrollmentServer, id, key, "")) {
+        strlcpy(serverUrl, enrollmentServer, sizeof(serverUrl)); strlcpy(deviceId, id, sizeof(deviceId));
         strlcpy(deviceKey, key, sizeof(deviceKey));
-        keyParam.setValue(deviceKey, 64);
-        pairingToken[0] = '\0'; pairingCode[0] = '\0';
-        pairingStatus = "saved"; needsSetup = false;
+        serverParam.setValue(serverUrl, 120); idParam.setValue(deviceId, 64); keyParam.setValue(deviceKey, 64);
+        clearEnrollment(); needsSetup = false; closeRequested = true; restoreOnClose = false;
         Serial.println("Pairing complete. Device key saved.");
       }
     }
+  } else if (result == 401 || result == 429 || result == 400) {
+    enrollmentFailed = true;
+    portalMessage = "验证码无效、过期、已被使用或尝试过多。请在后台重新生成验证码，返回配置填写并保存。";
+  } else {
+    portalMessage = "无法连接配对服务器，正在重试；请检查服务器地址，也可取消退出。";
   }
   http.end();
 }
 
 static void pollServer() {
-  if (wifi.getConfigPortalActive() || WiFi.status() != WL_CONNECTED || strlen(deviceKey) != 43 || !validConfig(serverUrl, deviceId, deviceKey)) return;
+  if (WiFi.status() != WL_CONNECTED || strlen(deviceKey) != 43 || !validConfig(serverUrl, deviceId, deviceKey)) return;
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(1500);
   if (!http.begin(client, String(serverUrl) + "/poll")) return;
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-Device-Key", deviceKey);
-  StaticJsonDocument<256> request;
+  StaticJsonDocument<384> request;
   request["device_id"] = deviceId;
   request["relay_on"] = relayOn;
-  request["firmware_version"] = "0.2.0";
+  request["firmware_version"] = "0.3.0";
+  request["config_active"] = wifi.getConfigPortalActive();
   if (*configAck) request["config_ack"] = configAck;
+  if (*configCloseAck) request["config_close_ack"] = configCloseAck;
   String body;
   serializeJson(request, body);
   uint32_t sent = millis();
@@ -220,10 +299,16 @@ static void pollServer() {
       if (strlen(configRequest) == 36 && strcmp(configRequest, configAck) != 0) {
         strlcpy(configAck, configRequest, sizeof(configAck));
         needsSetup = true;
+        portalSession.allowOpen();
+      }
+      const char* closeRequest = response["config_close_id"] | "";
+      if (strlen(closeRequest) == 36 && strcmp(closeRequest, configCloseAck) != 0) {
+        strlcpy(configCloseAck, closeRequest, sizeof(configCloseAck));
+        closeRequested = true; restoreOnClose = true;
       }
       if (strcmp(action, "off") == 0) {
         cutoff.detach(); lease.stop(); relayOff();
-      } else if (strcmp(action, "on") == 0 && response["expire_ts"].is<int64_t>() && response["server_ts"].is<int64_t>()) {
+      } else if (!wifi.getConfigPortalActive() && !needsSetup && !*enrollmentCode && strcmp(action, "on") == 0 && response["expire_ts"].is<int64_t>() && response["server_ts"].is<int64_t>()) {
         int64_t expiry = response["expire_ts"].as<int64_t>();
         int64_t remaining = expiry - response["server_ts"].as<int64_t>();
         if (remaining > 0 && remaining <= 86400 && response["remaining_seconds"].as<int64_t>() == remaining) {
@@ -256,21 +341,36 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\nRent Gate starting. Relay OFF. Phone setup opens automatically when needed.");
   loadConfig();
-  serverParam.setValue(serverUrl, 120);
+  loadEnrollment();
+  serverParam.setValue(*enrollmentServer ? enrollmentServer : serverUrl, 120);
+  codeParam.setValue(enrollmentCode, 8);
   idParam.setValue(deviceId, 64);
   keyParam.setValue(deviceKey, 64);
-  wifi.addParameter(&serverParam); wifi.addParameter(&idParam); wifi.addParameter(&keyParam);
+  wifi.addParameter(&codeParam); wifi.addParameter(&serverParam); wifi.addParameter(&idParam); wifi.addParameter(&keyParam);
   wifi.addParameter(&pairingHelp);
   wifi.setWebServerCallback([]() {
-    wifi.server->on("/pairing-status", HTTP_GET, []() {
-      StaticJsonDocument<128> doc;
-      doc["status"] = pairingStatus; doc["code"] = pairingCode;
+    wifi.server->collectHeaders("X-RentGate-Portal");
+    wifi.server->on("/portal/state", HTTP_GET, []() {
+      StaticJsonDocument<512> doc;
+      doc["message"] = portalMessage;
+      doc["remaining_seconds"] = portalSession.remainingSeconds(millis());
       String body; serializeJson(doc, body);
       wifi.server->sendHeader("Cache-Control", "no-store");
       wifi.server->send(200, "application/json", body);
     });
+    wifi.server->on("/portal/activity", HTTP_POST, []() {
+      if (wifi.server->header("X-RentGate-Portal") != "1") { wifi.server->send(403, "text/plain", "Forbidden"); return; }
+      portalSession.touch(millis());
+      wifi.server->send(204, "text/plain", "");
+    });
+    wifi.server->on("/portal/close", HTTP_POST, []() {
+      if (wifi.server->header("X-RentGate-Portal") != "1") { wifi.server->send(403, "text/plain", "Forbidden"); return; }
+      if (!closeRequested) { closeRequested = true; restoreOnClose = true; }
+      wifi.server->send(200, "application/json", "{\"status\":\"closing\"}");
+    });
   });
-  wifi.setSaveParamsCallback([]() { shouldSave = true; });
+  wifi.setCustomHeadElement(portalHead);
+  wifi.setSaveParamsCallback([]() { shouldSave = true; portalSession.touch(millis()); });
   wifi.setConfigPortalBlocking(false);
   wifi.setConfigPortalTimeout(0);
   // Close only after both WiFi and our own persisted device settings are valid.
@@ -290,14 +390,18 @@ void setup() {
 
 void loop() {
   wifi.process();
-  if (shouldSave) needsSetup = !saveConfig();
+  if (!closeRequested && shouldSave) needsSetup = !saveConfig();
+  if (!closeRequested && saveWaitingForWifi && WiFi.status() == WL_CONNECTED) needsSetup = !saveConfig();
   if (!lease.tick(millis()) && relayOn) { cutoff.detach(); relayOff(); }
   if (Serial.available() && Serial.read() == 'c') {
     cutoff.detach(); lease.stop(); relayOff();
     needsSetup = true;
+    portalSession.allowOpen();
     startPortal();
   }
+  if (portalSession.expired(millis()) && wifi.getConfigPortalActive()) { closeRequested = true; restoreOnClose = true; }
+  if (closeRequested) closePortal(restoreOnClose);
   maintainNetwork();
-  if (millis() - lastPoll >= 3000) { lastPoll = millis(); pollPairing(); pollServer(); }
+  if (millis() - lastPoll >= 3000) { lastPoll = millis(); pollPairing(); if (!closeRequested) pollServer(); }
   delay(5);
 }

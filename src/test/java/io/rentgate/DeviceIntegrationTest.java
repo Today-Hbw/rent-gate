@@ -289,7 +289,7 @@ class DeviceIntegrationTest {
 
     @Test void provisioningAdminWritesRequireCsrfAndPublicPairingValidatesTokens() throws Exception {
         create();
-        for(String endpoint:new String[]{"setup","pairing","pairing/confirm"}) {
+        for(String endpoint:new String[]{"setup","setup/close","pairing","pairing-code","pairing/confirm"}) {
             mvc.perform(post("/admin/devices/demo-001/"+endpoint).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"123456\"}"))
                     .andExpect(status().isForbidden());
             mvc.perform(post("/admin/devices/demo-001/"+endpoint).with(anonymous()).with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"123456\"}"))
@@ -297,5 +297,83 @@ class DeviceIntegrationTest {
         }
         mvc.perform(post("/device/pair").with(anonymous()).contentType(MediaType.APPLICATION_JSON).content("{\"device_id\":\"demo-001\",\"token\":\"short\"}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test void generatedCodeAutomaticallyReturnsCredentialsWithoutDeviceIdAndCannotBeReusedByAnotherDevice() throws Exception {
+        String old=create().get("device_key").asText();asAdmin();
+        var code=provisioning.generateCode("demo-001");
+        assertThat(code.code()).matches("[0-9]{8}");
+        assertThat(jdbc.queryForObject("SELECT enrollment_code_hash FROM device_pairing",String.class)).isNotEqualTo(code.code());
+        assertThat(provisioning.pollPairing("demo-001","a".repeat(43)).status()).isEqualTo("waiting");
+        String body=json.writeValueAsString(java.util.Map.of("code",code.code(),"token","a".repeat(43),"hardware_id","AABBCCDDEEFF"));
+        JsonNode credentials=json.readTree(mvc.perform(post("/device/enroll").with(anonymous()).contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store")).andReturn().getResponse().getContentAsString());
+        assertThat(credentials.get("device_id").asText()).isEqualTo("demo-001");
+        String key=credentials.get("device_key").asText();assertThat(key).hasSize(43).isNotEqualTo(old);
+        assertThat(provisioning.enroll(code.code(),"a".repeat(43),"aabbccddeeff","code-retry").deviceKey()).isEqualTo(key);
+        for(String attack:new String[]{"token","hardware"}) {
+            String payload=json.writeValueAsString(java.util.Map.of("code",code.code(),"token",(attack.equals("token")?"b":"a").repeat(43),"hardware_id",attack.equals("hardware")?"112233445566":"AABBCCDDEEFF"));
+            mvc.perform(post("/device/enroll").with(anonymous()).contentType(MediaType.APPLICATION_JSON).content(payload)).andExpect(status().isUnauthorized());
+        }
+        asAdmin();service.rotateKey("demo-001");
+        org.assertj.core.api.Assertions.assertThatThrownBy(()->provisioning.enroll(code.code(),"a".repeat(43),"AABBCCDDEEFF","rotated"))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
+
+    @Test void codesExpireCancelAndSeparateConcurrentDevices() {
+        asAdmin();service.create("code-a","A");service.create("code-b","B");
+        var a=provisioning.generateCode("code-a");var b=provisioning.generateCode("code-b");
+        assertThat(a.code()).isNotEqualTo(b.code());
+        assertThat(provisioning.enroll(a.code(),"a".repeat(43),"000000000001","device-a").deviceId()).isEqualTo("code-a");
+        assertThat(provisioning.enroll(b.code(),"b".repeat(43),"000000000002","device-b").deviceId()).isEqualTo("code-b");
+        provisioning.cancelPairing("code-b");
+        org.assertj.core.api.Assertions.assertThatThrownBy(()->provisioning.enroll(b.code(),"b".repeat(43),"000000000002","cancelled"))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        clock.seconds+=300;
+        org.assertj.core.api.Assertions.assertThatThrownBy(()->provisioning.enroll(a.code(),"a".repeat(43),"000000000001","expired"))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+    }
+
+    @Test void concurrentRedemptionHasOnlyOneWinnerAndWinnerCanRetry() throws Exception {
+        asAdmin();service.create("concurrent-code","Concurrent");String code=provisioning.generateCode("concurrent-code").code();
+        var pool=Executors.newFixedThreadPool(2);
+        try {
+            var tasks=new java.util.ArrayList<java.util.concurrent.Callable<String>>();
+            for(String token:new String[]{"x".repeat(43),"y".repeat(43)}) tasks.add(()->{
+                try { provisioning.enroll(code,token,"AABBCC000001","parallel");return token; }
+                catch(org.springframework.web.server.ResponseStatusException rejected) { return null; }
+            });
+            var results=pool.invokeAll(tasks);String first=results.get(0).get(),second=results.get(1).get();
+            assertThat((first==null) != (second==null)).isTrue();String winner=first==null?second:first;
+            String key=provisioning.enroll(code,winner,"AABBCC000001","parallel").deviceKey();
+            assertThat(provisioning.enroll(code,winner,"AABBCC000001","parallel").deviceKey()).isEqualTo(key);
+        } finally {pool.shutdownNow();}
+    }
+
+    @Test void enrollmentFailuresAreRateLimitedAndMalformedRequestsRejected() throws Exception {
+        for(int i=0;i<20;i++) mvc.perform(post("/device/enroll").with(anonymous()).with(r->{r.setRemoteAddr("198.51.100.88");return r;})
+                .contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"00000000\",\"token\":\""+"z".repeat(43)+"\",\"hardware_id\":\"AABBCCDDEEFF\"}"))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/device/enroll").with(anonymous()).with(r->{r.setRemoteAddr("198.51.100.88");return r;}).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"code\":\"00000000\",\"token\":\""+"z".repeat(43)+"\",\"hardware_id\":\"AABBCCDDEEFF\"}"))
+                .andExpect(status().isTooManyRequests());
+        mvc.perform(post("/device/enroll").with(anonymous()).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"short\",\"token\":\"x\",\"hardware_id\":\"bad\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test void backendCanCloseAnActivePortalAndAcknowledgementEndsTheCommand() throws Exception {
+        String key=create().get("device_key").asText();asAdmin();
+        service.poll("demo-001",key,false,null,"0.2.0");
+        mvc.perform(post("/admin/devices/demo-001/setup/close").with(csrf())).andExpect(status().isConflict());
+        service.poll("demo-001",key,false,null,"0.3.0",true,null);asAdmin();
+        assertThat(service.device("demo-001").setupPending()).isTrue();
+        provisioning.generateCode("demo-001");
+        String close=provisioning.closeSetup("demo-001").requestId();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM device_pairing",Integer.class)).isZero();
+        var response=service.poll("demo-001",key,false,null,"0.3.0",true,null);
+        assertThat(response.configCloseId()).isEqualTo(close);assertThat(response.configRequestId()).isNull();
+        assertThat(service.poll("demo-001",key,false,null,"0.3.0",false,close).configCloseId()).isNull();
+        assertThat(service.device("demo-001").setupPending()).isFalse();
+        assertThat(service.credentials("demo-001").deviceKey()).isEqualTo(key);
     }
 }
