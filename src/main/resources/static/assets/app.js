@@ -84,11 +84,16 @@ function deviceRows() {
   const q=state.search.toLowerCase();
   const rows=state.rows.filter(d=>[d.device_id,d.name,d.owner_name].join(' ').toLowerCase().includes(q) && (!state.status || ({online:d.online,offline:!d.online,running:d.status==='on',disabled:!d.enabled})[state.status]));
   $('device-table').innerHTML=table(['设备','归属 / 类型','连接状态','运行 / 剩余','操作'],rows.map(d=>[
-    `<strong>${esc(d.name)}</strong><small class="mono">${esc(d.device_id)}</small>`,`${esc(d.owner_name||'未分配')}<small>${esc(d.type_name)} · ${esc(d.provider_name||'平台')}</small>`,
+    `<strong>${esc(d.name)}</strong><small class="mono">编号：${esc(d.device_id)}</small><small class="mono">硬件：${esc(d.hardware_id?d.hardware_id.match(/.{2}/g).join(':'):'尚未上报')}</small><small>固件：${esc(d.firmware_version||'尚未上报')}</small>`,`${esc(d.owner_name||'未分配')}<small>${esc(d.type_name)} · ${esc(d.provider_name||'平台')}</small>`,
     badge(d.online?'在线':'离线',d.online?'green':'')+(!d.enabled?' '+badge('已停用','orange'):'')+`<small>心跳 ${esc(time(d.last_seen_ts))}</small>`,
     badge(d.status==='on'?(d.run_source==='trial'?'试用中':'手动运行'):'待机',d.status==='on'?'green':'')+`<small class="mono">${duration(d.remaining_seconds)}</small><small>继电器回报：${d.relay_on===null?'尚无':d.relay_on?'通电':'断电'}</small>`,
-    `<div class="row-actions">${d.enabled?action('release',d.device_id,'放行'):''}${action('stop',d.device_id,'停止','danger')}${action('edit',d.device_id,'编辑','subtle')}${action('qr',d.device_id,'二维码','subtle')}${action('setup',d.device_id,d.setup_pending?'配网中':'进入配网','subtle')}${action('close-setup',d.device_id,'结束配网','subtle')}${action('pair',d.device_id,'配对','subtle')}${action('view-key',d.device_id,'查看密钥','subtle')}${action('key',d.device_id,'重设密钥','subtle')}</div>`]));
+    `<div class="row-actions">${d.enabled?action('release',d.device_id,'放行'):''}${action('stop',d.device_id,'停止','danger')}${action('edit',d.device_id,'编辑','subtle')}${action('qr',d.device_id,'二维码','subtle')}${setupAction(d)}${action('pair',d.device_id,'配对','subtle')}${action('view-key',d.device_id,'查看密钥','subtle')}${action('key',d.device_id,'重设密钥','subtle')}</div>`]));
   if(focused) [...$('device-table').querySelectorAll('[data-action]')].find(b=>b.dataset.action===focusAction&&b.dataset.id===focusId)?.focus({preventScroll:true});
+}
+function setupAction(device) {
+  const status=device.setup_state||(device.setup_pending?'active':'idle');
+  if(status==='closing')return '<button class="row-action subtle" disabled>正在结束配网</button>';
+  return status==='idle'?action('setup',device.device_id,'进入配网','subtle'):action('close-setup',device.device_id,'结束配网','subtle');
 }
 function renderPage(page,rows) {
   let html='';

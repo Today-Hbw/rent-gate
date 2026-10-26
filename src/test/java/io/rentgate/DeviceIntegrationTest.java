@@ -369,11 +369,33 @@ class DeviceIntegrationTest {
         assertThat(service.device("demo-001").setupPending()).isTrue();
         provisioning.generateCode("demo-001");
         String close=provisioning.closeSetup("demo-001").requestId();
+        assertThat(service.device("demo-001").setupState()).isEqualTo("closing");
+        assertThat(provisioning.closeSetup("demo-001").requestId()).isEqualTo(close);
+        org.assertj.core.api.Assertions.assertThatThrownBy(()->provisioning.requestSetup("demo-001"))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM device_pairing",Integer.class)).isZero();
         var response=service.poll("demo-001",key,false,null,"0.3.0",true,null);
         assertThat(response.configCloseId()).isEqualTo(close);assertThat(response.configRequestId()).isNull();
         assertThat(service.poll("demo-001",key,false,null,"0.3.0",false,close).configCloseId()).isNull();
         assertThat(service.device("demo-001").setupPending()).isFalse();
+        assertThat(service.device("demo-001").setupState()).isEqualTo("idle");
         assertThat(service.credentials("demo-001").deviceKey()).isEqualTo(key);
+    }
+
+    @Test void bindingMetadataIsSavedFromEnrollmentOrAuthenticatedHeartbeatAndSurvivesKeyRotation() throws Exception {
+        String key=create().get("device_key").asText();asAdmin();
+        assertThat(service.device("demo-001").hardwareId()).isNull();
+        var heartbeat=service.poll("demo-001",key,false,null,"0.3.1",false,null,"aabbcc112233");
+        assertThat(heartbeat.deviceName()).isEqualTo("一号桌");
+        assertThat(service.device("demo-001").hardwareId()).isEqualTo("AABBCC112233");
+        mvc.perform(post("/poll").with(anonymous()).header("X-Device-Key","wrong").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"device_id\":\"demo-001\",\"hardware_id\":\"FFFFFFFFFFFF\"}")).andExpect(status().isUnauthorized());
+        asAdmin();assertThat(service.device("demo-001").hardwareId()).isEqualTo("AABBCC112233");
+        var code=provisioning.generateCode("demo-001");
+        var bound=provisioning.enroll(code.code(),"m".repeat(43),"112233445566","metadata");
+        assertThat(bound.deviceName()).isEqualTo("一号桌");
+        assertThat(service.device("demo-001").hardwareId()).isEqualTo("112233445566");
+        service.rotateKey("demo-001");
+        assertThat(service.device("demo-001").hardwareId()).isEqualTo("112233445566");
     }
 }

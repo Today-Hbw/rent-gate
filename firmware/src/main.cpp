@@ -23,6 +23,9 @@ extern "C" {
 static char serverUrl[121] = "http://162.14.76.232:8080";
 static char deviceId[65] = "";
 static char deviceKey[65] = "";
+static char deviceName[241] = "";
+static constexpr char firmwareVersion[] = "0.3.1";
+static bool bindingVerified = false;
 static char pairingToken[44] = "";
 static char enrollmentCode[9] = "";
 static char enrollmentServer[121] = "";
@@ -30,6 +33,8 @@ static bool enrollmentFailed = false;
 static char configAck[37] = "";
 static char configCloseAck[37] = "";
 static String previousSsid, previousPassword;
+static String queuedSsid, queuedPassword;
+static bool connectAfterClose = false;
 static const char* portalMessage = "填写 WiFi 和后台生成的验证码即可配对；不填验证码时，请完整填写手动配置。";
 static WiFiManager wifi;
 static WiFiManagerParameter serverParam("server", "服务器 HTTP 地址（如 http://192.168.1.10:8080）", "", 120);
@@ -46,7 +51,7 @@ static PortalSession portalSession;
 static volatile bool relayOn = false;
 static bool shouldSave = false;
 static bool needsSetup = false;
-static bool closeRequested = false, restoreOnClose = true, saveWaitingForWifi = false;
+static bool closeRequested = false, restoreOnClose = true;
 static bool fsReady = false;
 static uint32_t lastPoll = 0;
 
@@ -84,7 +89,7 @@ static void loadConfig() {
   if (!fsReady) { Serial.println("LittleFS unavailable. Erase flash and upload firmware again."); return; }
   File file = LittleFS.open("/config.json", "r");
   if (!file) return;
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<1024> doc;
   if (deserializeJson(doc, file)) return;
   const char* server = doc["server"] | "";
   const char* id = doc["device"] | "";
@@ -93,6 +98,7 @@ static void loadConfig() {
   strlcpy(serverUrl, server, sizeof(serverUrl));
   strlcpy(deviceId, id, sizeof(deviceId));
   strlcpy(deviceKey, key, sizeof(deviceKey));
+  strlcpy(deviceName, doc["device_name"] | "", sizeof(deviceName));
   const char* token = doc["pairing_token"] | "";
   if (strlen(token) == 43) strlcpy(pairingToken, token, sizeof(pairingToken));
 }
@@ -107,7 +113,7 @@ static void loadEnrollment() {
   if (!fsReady) return;
   File file = LittleFS.open("/pending.json", "r");
   if (!file) return;
-  StaticJsonDocument<384> doc;
+  StaticJsonDocument<512> doc;
   if (deserializeJson(doc, file)) return;
   const char* server = doc["server"] | "";
   const char* code = doc["code"] | "";
@@ -116,12 +122,16 @@ static void loadEnrollment() {
   strlcpy(enrollmentServer, server, sizeof(enrollmentServer));
   strlcpy(enrollmentCode, code, sizeof(enrollmentCode));
   strlcpy(pairingToken, token, sizeof(pairingToken));
+  queuedSsid = doc["ssid"] | ""; queuedPassword = doc["password"] | "";
+  connectAfterClose = queuedSsid.length() > 0;
+  // Resume a durable saved request in the background rather than reopening setup.
+  portalSession.closed(millis());
 }
 
-static bool writeConfig(const char* server, const char* id, const char* key, const char* token) {
+static bool writeConfig(const char* server, const char* id, const char* key, const char* token, const char* name = deviceName) {
   if (!fsReady) { wifi.setTitle("RentGate - Storage unavailable"); return false; }
-  StaticJsonDocument<512> doc;
-  doc["server"] = server; doc["device"] = id; doc["key"] = key; doc["pairing_token"] = token;
+  StaticJsonDocument<1024> doc;
+  doc["server"] = server; doc["device"] = id; doc["key"] = key; doc["pairing_token"] = token; doc["device_name"] = name;
   File file = LittleFS.open("/config.tmp", "w");
   if (!file || !serializeJson(doc, file)) { wifi.setTitle("RentGate - Save failed; retry"); return false; }
   file.close();
@@ -132,7 +142,30 @@ static bool writeConfig(const char* server, const char* id, const char* key, con
 static void clearEnrollment() {
   enrollmentCode[0] = '\0'; enrollmentServer[0] = '\0'; pairingToken[0] = '\0';
   enrollmentFailed = false; codeParam.setValue("", 8);
+  queuedSsid = ""; queuedPassword = ""; connectAfterClose = false;
   if (fsReady && LittleFS.exists("/pending.json")) LittleFS.remove("/pending.json");
+}
+
+static bool queueEnrollment(const char* server, const char* code, const String& ssid, const String& password) {
+  if (!validServer(server) || !validCode(code) || !ssid.length() || ssid.length() > 32 || password.length() > 64) {
+    portalMessage = "请填写 WiFi 名称、有效服务器地址和 8 位验证码。"; return false;
+  }
+  if (!fsReady) { portalMessage = "存储不可用，配置未保存。"; return false; }
+  if (!*pairingToken || strcmp(code, enrollmentCode) != 0 || strcmp(server, enrollmentServer) != 0) newPairingToken();
+  StaticJsonDocument<512> doc;
+  doc["server"] = server; doc["code"] = code; doc["token"] = pairingToken; doc["ssid"] = ssid; doc["password"] = password;
+  File file = LittleFS.open("/pending.tmp", "w");
+  if (!file || !serializeJson(doc, file)) { portalMessage = "保存失败，请重试。"; return false; }
+  file.close();
+  if (!LittleFS.rename("/pending.tmp", "/pending.json")) { portalMessage = "保存失败，请重试。"; return false; }
+  strlcpy(enrollmentServer, server, sizeof(enrollmentServer));
+  while (strlen(enrollmentServer) > 7 && enrollmentServer[strlen(enrollmentServer) - 1] == '/') enrollmentServer[strlen(enrollmentServer) - 1] = '\0';
+  strlcpy(enrollmentCode, code, sizeof(enrollmentCode));
+  queuedSsid = ssid; queuedPassword = password; connectAfterClose = true;
+  enrollmentFailed = false;
+  closeRequested = true; restoreOnClose = false;
+  portalMessage = "已保存，正在后台连接 WiFi 并配对。";
+  return true;
 }
 
 static bool saveConfig() {
@@ -144,38 +177,21 @@ static bool saveConfig() {
   bool byCode = *code;
   if (!validServer(server) || (byCode ? !validCode(code) : (!validConfig(server, id, key) || strlen(key) != 43))) {
     portalMessage = "配置有误：填写有效 HTTP 地址和 8 位验证码，或留空验证码并完整填写设备编号、43 字符密钥。";
-    saveWaitingForWifi = false;
     return false;
   }
-  if (WiFi.status() != WL_CONNECTED) {
-    saveWaitingForWifi = true;
-    portalMessage = "WiFi 尚未连接成功，请检查 WiFi 名称和密码。可以返回配置修改，或取消退出。";
-    return false;
-  }
-  saveWaitingForWifi = false;
   if (byCode) {
-    if (!*pairingToken || strcmp(code, enrollmentCode) != 0 || strcmp(server, enrollmentServer) != 0) newPairingToken();
-    if (!fsReady) { portalMessage = "存储不可用，配置未保存。"; return false; }
-    StaticJsonDocument<384> doc;
-    doc["server"] = server; doc["code"] = code; doc["token"] = pairingToken;
-    File file = LittleFS.open("/pending.tmp", "w");
-    if (!file || !serializeJson(doc, file)) { portalMessage = "保存失败，请重试。"; return false; }
-    file.close();
-    if (!LittleFS.rename("/pending.tmp", "/pending.json")) { portalMessage = "保存失败，请重试。"; return false; }
-    strlcpy(enrollmentServer, server, sizeof(enrollmentServer));
-    while (strlen(enrollmentServer) > 7 && enrollmentServer[strlen(enrollmentServer) - 1] == '/') enrollmentServer[strlen(enrollmentServer) - 1] = '\0';
-    strlcpy(enrollmentCode, code, sizeof(enrollmentCode));
-    enrollmentFailed = false;
-    portalMessage = "WiFi 已连接，正在验证验证码并自动获取设备编号和密钥…";
-    lastPoll = millis() - 3000;
-    return true;
+    return queueEnrollment(server, code, WiFi.SSID(), WiFi.psk());
   }
-  if (!writeConfig(server, id, key, "")) { portalMessage = "保存失败，请重试。"; return false; }
+  bool sameDevice = strcmp(id, deviceId) == 0;
+  if (!writeConfig(server, id, key, "", sameDevice ? deviceName : "")) { portalMessage = "保存失败，请重试。"; return false; }
   strlcpy(serverUrl, server, sizeof(serverUrl));
   while (strlen(serverUrl) > 7 && serverUrl[strlen(serverUrl) - 1] == '/') serverUrl[strlen(serverUrl) - 1] = '\0';
   strlcpy(deviceId, id, sizeof(deviceId));
   strlcpy(deviceKey, key, sizeof(deviceKey));
+  if (!sameDevice) deviceName[0] = '\0';
+  bindingVerified = false;
   clearEnrollment();
+  queuedSsid = WiFi.SSID(); queuedPassword = WiFi.psk(); connectAfterClose = queuedSsid.length() > 0;
   closeRequested = true; restoreOnClose = false;
   wifi.setTitle("RentGate setup");
   Serial.println("Config saved. Credentials are not printed.");
@@ -193,7 +209,7 @@ static void startPortal() {
 }
 
 static void closePortal(bool restore) {
-  closeRequested = false; shouldSave = false; saveWaitingForWifi = false; needsSetup = false;
+  closeRequested = false; shouldSave = false; needsSetup = false;
   bool active = wifi.getConfigPortalActive();
   if (active) wifi.stopConfigPortal();
   if (restore) {
@@ -207,7 +223,7 @@ static void closePortal(bool restore) {
   }
   portalSession.closed(millis());
   WiFi.setAutoReconnect(true);
-  if (WiFi.status() != WL_CONNECTED) WiFi.begin();
+  if (WiFi.status() != WL_CONNECTED && !connectAfterClose) WiFi.begin();
   lastPoll = millis() - 3000;
   portalMessage = "填写 WiFi 和后台生成的验证码即可配对；不填验证码时，请完整填写手动配置。";
 }
@@ -248,14 +264,16 @@ static void pollPairing() {
   String hardware = WiFi.macAddress(); hardware.replace(":", ""); request["hardware_id"] = hardware;
   String body; serializeJson(request, body);
   int result = http.POST(body);
-  if (result == HTTP_CODE_OK && http.getSize() <= 512) {
-    StaticJsonDocument<512> response;
+  if (result == HTTP_CODE_OK && http.getSize() <= 768) {
+    StaticJsonDocument<768> response;
     if (!deserializeJson(response, http.getString())) {
       const char* id = response["device_id"] | "";
       const char* key = response["device_key"] | "";
-      if (validConfig(enrollmentServer, id, key) && strlen(key) == 43 && writeConfig(enrollmentServer, id, key, "")) {
+      const char* name = response["device_name"] | "";
+      if (validConfig(enrollmentServer, id, key) && strlen(key) == 43 && writeConfig(enrollmentServer, id, key, "", name)) {
         strlcpy(serverUrl, enrollmentServer, sizeof(serverUrl)); strlcpy(deviceId, id, sizeof(deviceId));
         strlcpy(deviceKey, key, sizeof(deviceKey));
+        strlcpy(deviceName, name, sizeof(deviceName)); bindingVerified = true;
         serverParam.setValue(serverUrl, 120); idParam.setValue(deviceId, 64); keyParam.setValue(deviceKey, 64);
         clearEnrollment(); needsSetup = false; closeRequested = true; restoreOnClose = false;
         Serial.println("Pairing complete. Device key saved.");
@@ -281,7 +299,8 @@ static void pollServer() {
   StaticJsonDocument<384> request;
   request["device_id"] = deviceId;
   request["relay_on"] = relayOn;
-  request["firmware_version"] = "0.3.0";
+  request["firmware_version"] = firmwareVersion;
+  String hardware = WiFi.macAddress(); hardware.replace(":", ""); request["hardware_id"] = hardware;
   request["config_active"] = wifi.getConfigPortalActive();
   if (*configAck) request["config_ack"] = configAck;
   if (*configCloseAck) request["config_close_ack"] = configCloseAck;
@@ -289,11 +308,17 @@ static void pollServer() {
   serializeJson(request, body);
   uint32_t sent = millis();
   int code = http.POST(body);
-  if (code == HTTP_CODE_OK && http.getSize() <= 512) {
+  if (code == HTTP_CODE_OK && http.getSize() <= 768) {
     String payload = http.getString();
     uint32_t latency = millis() - sent;
-    StaticJsonDocument<512> response;
+    StaticJsonDocument<768> response;
     if (!deserializeJson(response, payload)) {
+      bindingVerified = true;
+      const char* name = response["device_name"] | "";
+      if (*name && strcmp(name, deviceName) != 0) {
+        strlcpy(deviceName, name, sizeof(deviceName));
+        writeConfig(serverUrl, deviceId, deviceKey, "", deviceName);
+      }
       const char* action = response["action"] | "";
       const char* configRequest = response["config_request_id"] | "";
       if (strlen(configRequest) == 36 && strcmp(configRequest, configAck) != 0) {
@@ -327,6 +352,7 @@ static void pollServer() {
       }
     }
   } else if (code == 401) {
+    bindingVerified = false;
     Serial.println("Device authentication failed. Opening phone setup to update ID/key.");
     needsSetup = true;
   }
@@ -350,10 +376,29 @@ void setup() {
   wifi.addParameter(&pairingHelp);
   wifi.setWebServerCallback([]() {
     wifi.server->collectHeaders("X-RentGate-Portal");
+    wifi.server->on("/", HTTP_GET, []() {
+      String html = "<!doctype html><html lang='zh-CN'><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>设备配对</title>";
+      html += portalHead; html += "</head><body>"; html += portalHome; html += "</body></html>";
+      wifi.server->sendHeader("Cache-Control", "no-store");
+      wifi.server->send(200, "text/html; charset=utf-8", html);
+    });
+    wifi.server->on("/portal/quick-pair", HTTP_POST, []() {
+      if (wifi.server->header("X-RentGate-Portal") != "1") { wifi.server->send(403, "application/json", "{\"message\":\"Forbidden\"}"); return; }
+      String ssid = wifi.server->arg("ssid"), password = wifi.server->arg("password"), code = wifi.server->arg("code");
+      if (ssid == WiFi.SSID() && password.isEmpty()) password = WiFi.psk();
+      if (!queueEnrollment(serverParam.getValue(), code.c_str(), ssid, password)) {
+        StaticJsonDocument<256> error; error["message"] = portalMessage; String body; serializeJson(error, body);
+        wifi.server->send(400, "application/json", body); return;
+      }
+      portalSession.touch(millis());
+      wifi.server->send(200, "application/json", "{\"status\":\"saved\"}");
+    });
     wifi.server->on("/portal/state", HTTP_GET, []() {
-      StaticJsonDocument<512> doc;
+      StaticJsonDocument<768> doc;
       doc["message"] = portalMessage;
       doc["remaining_seconds"] = portalSession.remainingSeconds(millis());
+      doc["device_id"] = deviceId; doc["device_name"] = deviceName; doc["binding_verified"] = bindingVerified;
+      doc["hardware_id"] = WiFi.macAddress(); doc["firmware_version"] = firmwareVersion; doc["wifi_ssid"] = WiFi.SSID();
       String body; serializeJson(doc, body);
       wifi.server->sendHeader("Cache-Control", "no-store");
       wifi.server->send(200, "application/json", body);
@@ -375,6 +420,7 @@ void setup() {
   wifi.setConfigPortalTimeout(0);
   // Close only after both WiFi and our own persisted device settings are valid.
   wifi.setDisableConfigPortal(false);
+  wifi.setSaveConnect(false);
   wifi.setSaveConnectTimeout(15);
   wifi.setWiFiAutoReconnect(true);
   wifi.setTitle("RentGate setup");
@@ -391,7 +437,6 @@ void setup() {
 void loop() {
   wifi.process();
   if (!closeRequested && shouldSave) needsSetup = !saveConfig();
-  if (!closeRequested && saveWaitingForWifi && WiFi.status() == WL_CONNECTED) needsSetup = !saveConfig();
   if (!lease.tick(millis()) && relayOn) { cutoff.detach(); relayOff(); }
   if (Serial.available() && Serial.read() == 'c') {
     cutoff.detach(); lease.stop(); relayOff();
@@ -401,6 +446,10 @@ void loop() {
   }
   if (portalSession.expired(millis()) && wifi.getConfigPortalActive()) { closeRequested = true; restoreOnClose = true; }
   if (closeRequested) closePortal(restoreOnClose);
+  if (connectAfterClose && !wifi.getConfigPortalActive()) {
+    WiFi.persistent(true); WiFi.begin(queuedSsid.c_str(), queuedPassword.c_str()); WiFi.persistent(false);
+    connectAfterClose = false; queuedSsid = ""; queuedPassword = "";
+  }
   maintainNetwork();
   if (millis() - lastPoll >= 3000) { lastPoll = millis(); pollPairing(); if (!closeRequested) pollServer(); }
   delay(5);

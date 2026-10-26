@@ -6,7 +6,7 @@
 
 本地运行 `mvnw verify`，将以下文件通过 SSH/SCP 上传到服务器的专用目录：
 
-- `target/rent-gate-0.3.0.jar` → `releases/<版本>/app.jar`
+- `target/rent-gate-0.3.1.jar` → `releases/<版本>/app.jar`
 - `deploy/Dockerfile.runtime` → `releases/<版本>/Dockerfile`
 - `deploy/compose.yml` → `config/compose.yml`
 

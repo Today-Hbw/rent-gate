@@ -2,6 +2,10 @@
 
 JSON 字段为 snake_case，时间戳为 Unix 秒，金额为元。GET `/health` 返回 `{"status":"ok"}`。
 
+v0.3.1：设备列表增加 hardware_id 与 setup_state（idle/opening/active/closing）；轮询可携带 hardware_id（12 位 MAC 十六进制，认证通过后才保存）。新固件的轮询/配对响应含 device_name，供设备配网页显示。旧固件无须携带新增字段。
+
+商户默认展示当前归属账号名称；独立保存的商户名称按 name_explicit 区分。历史原始值保留但默认跟随当前归属，需要独立门店名称时在商户资料重新保存。
+
 ## 会话与权限
 
 GET `/login` 取得表单，POST `/login` 提交 username、password 与表单 CSRF。三级账号共用入口。POST `/logout` 需 CSRF。

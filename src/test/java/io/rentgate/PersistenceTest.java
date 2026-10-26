@@ -24,6 +24,18 @@ class PersistenceTest {
 
     @AfterEach void clearSecurity() { org.springframework.security.core.context.SecurityContextHolder.clearContext(); }
 
+    @Test void upgradesV4PairingHardwareIntoPersistentBindingMetadata() throws Exception {
+        String url="jdbc:h2:file:"+directory.resolve("v4").toString().replace('\\','/')+";DB_CLOSE_ON_EXIT=FALSE";
+        org.flywaydb.core.Flyway.configure().dataSource(url,"sa","").target("4").load().migrate();
+        try(var connection=java.sql.DriverManager.getConnection(url,"sa", "");var statement=connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO device(device_id,name,key_hash,created_ts) VALUES('paired-v4','旧版配对设备','old-hash',1)");
+            statement.executeUpdate("INSERT INTO device_pairing(device_id,expires_ts,approved,hardware_id) VALUES('paired-v4',1,TRUE,'AABBCC112233')");
+        }
+        try(var upgraded=start(url)) {
+            assertThat(upgraded.getBean(DeviceService.class).device("paired-v4").hardwareId()).isEqualTo("AABBCC112233");
+        }
+    }
+
     @Test void restartRestoresDeviceKeyExpiryAndEmptyOrderTable() {
         String url = "jdbc:h2:file:"+directory.resolve("persistent").toString().replace('\\','/')+";DB_CLOSE_ON_EXIT=FALSE";
         String key;

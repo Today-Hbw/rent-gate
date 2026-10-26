@@ -31,9 +31,9 @@ public class DeviceService {
     }
     public record Device(String deviceId,String name,String status,long expireTs,Long lastSeenTs,Boolean relayOn,boolean online,long remainingSeconds,
                          Long userId,String ownerName,Long providerId,String providerName,Long merchantId,long deviceTypeId,String typeName,boolean enabled,
-                         String runSource,Long trialUsedAt,long cooldownUntil,String publicToken,String firmwareVersion,boolean setupPending) {}
+                         String runSource,Long trialUsedAt,long cooldownUntil,String publicToken,String firmwareVersion,boolean setupPending,String setupState,String hardwareId) {}
     public record Credentials(String deviceId,String deviceKey,String publicToken) {}
-    public record Poll(String action,long expireTs,long serverTs,long remainingSeconds,String configRequestId,String configCloseId) {}
+    public record Poll(String action,long expireTs,long serverTs,long remainingSeconds,String configRequestId,String configCloseId,String deviceName) {}
     public record GuestDevice(String name,String merchantName,String ownerName,String typeName,String status,boolean online,long serverTs,long expireTs,long remainingSeconds,
                               int trialMinutes,int cooldownMinutes,long cooldownUntil,long cooldownRemainingSeconds,boolean trialAvailable,String trialUnavailableReason,
                               boolean paymentEnabled,List<ManagementService.PublicPlan> plans,String siteName,String guestNotice) {}
@@ -65,11 +65,14 @@ public class DeviceService {
         return jdbc.query("SELECT d.*,o.display_name AS owner_name,o.provider_id,p.display_name AS provider_name,t.name AS type_name FROM device d JOIN device_type t ON t.id=d.device_type_id LEFT JOIN sys_user o ON o.id=d.user_id LEFT JOIN sys_user p ON p.id=o.provider_id WHERE "
                 +where+" ORDER BY d.created_ts DESC,d.device_id",(rs,row)-> {
             long expiry=rs.getLong("expire_ts"); Long seen=rs.getObject("last_seen_ts",Long.class); boolean on=rs.getBoolean("enabled") && expiry>now;
+            boolean online=seen!=null && now-seen<=timeout;
+            boolean opening=rs.getString("setup_request_id")!=null && rs.getLong("setup_requested_ts")>now-300;
+            boolean closing=rs.getString("setup_close_id")!=null && rs.getLong("setup_close_ts")>now-300;
+            String setupState=closing?"closing":rs.getBoolean("setup_active") && online?"active":opening?"opening":"idle";
             return new Device(rs.getString("device_id"),rs.getString("name"),on?"on":"off",expiry,seen,rs.getObject("relay_on",Boolean.class),seen!=null && now-seen<=timeout,on?expiry-now:0,
                     rs.getObject("user_id",Long.class),rs.getString("owner_name"),rs.getObject("provider_id",Long.class),rs.getString("provider_name"),rs.getObject("merchant_id",Long.class),
                     rs.getLong("device_type_id"),rs.getString("type_name"),rs.getBoolean("enabled"),rs.getString("run_source"),rs.getObject("trial_used_at",Long.class),rs.getLong("cooldown_until"),rs.getString("public_token"),
-                    rs.getString("firmware_version"),(rs.getString("setup_request_id")!=null && rs.getLong("setup_requested_ts")>now-300)
-                    || (rs.getBoolean("setup_active") && seen!=null && now-seen<=timeout));
+                    rs.getString("firmware_version"),!setupState.equals("idle"),setupState,rs.getString("hardware_id"));
         },params);
     }
 
@@ -132,6 +135,9 @@ public class DeviceService {
         return poll(id,key,relayOn,configAck,firmwareVersion,null,null);
     }
     @Transactional public Poll poll(String id,String key,Boolean relayOn,String configAck,String firmwareVersion,Boolean configActive,String configCloseAck) {
+        return poll(id,key,relayOn,configAck,firmwareVersion,configActive,configCloseAck,null);
+    }
+    @Transactional public Poll poll(String id,String key,Boolean relayOn,String configAck,String firmwareVersion,Boolean configActive,String configCloseAck,String hardwareId) {
         Stored stored;
         try { stored=read(id,false,true); } catch (ResponseStatusException error) { throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"设备认证失败"); }
         if (key==null || key.length()>128 || !MessageDigest.isEqual(stored.hash.getBytes(StandardCharsets.UTF_8),hash(key).getBytes(StandardCharsets.UTF_8))) {
@@ -141,13 +147,16 @@ public class DeviceService {
         // Recover viewable legacy keys only after successful authentication.
         jdbc.update("UPDATE device SET key_cipher=? WHERE device_id=? AND key_cipher IS NULL",vault.encrypt(id,key),id);
         if (firmwareVersion!=null) jdbc.update("UPDATE device SET firmware_version=? WHERE device_id=?",firmwareVersion,id);
+        if (hardwareId!=null) jdbc.update("UPDATE device SET hardware_id=? WHERE device_id=?",hardwareId.toUpperCase(java.util.Locale.ROOT),id);
         if (configAck!=null) jdbc.update("UPDATE device SET setup_request_id=NULL,setup_requested_ts=NULL WHERE device_id=? AND setup_request_id=?",id,configAck);
         if (configActive!=null) jdbc.update("UPDATE device SET setup_active=? WHERE device_id=?",configActive,id);
         if (configCloseAck!=null) jdbc.update("UPDATE device SET setup_close_id=NULL,setup_close_ts=NULL WHERE device_id=? AND setup_close_id=?",id,configCloseAck);
         jdbc.update("UPDATE device SET status=?,last_seen_ts=?,relay_on=? WHERE device_id=?",on?"on":"off",now,relayOn,id);
         String command=jdbc.queryForObject("SELECT CASE WHEN setup_requested_ts>? THEN setup_request_id ELSE NULL END FROM device WHERE device_id=?",String.class,now-300,id);
         String close=jdbc.queryForObject("SELECT CASE WHEN setup_close_ts>? THEN setup_close_id ELSE NULL END FROM device WHERE device_id=?",String.class,now-300,id);
-        return new Poll(on?"on":"off",stored.expiry,now,on?stored.expiry-now:0,command,close);
+        // Legacy firmware has a smaller JSON buffer; metadata is for the new firmware.
+        String metadataName=firmwareVersion==null || firmwareVersion.isBlank() || firmwareVersion.equals("0.2.0") || firmwareVersion.equals("0.3.0")?null:stored.name;
+        return new Poll(on?"on":"off",stored.expiry,now,on?stored.expiry-now:0,command,close,metadataName);
     }
 
     public GuestDevice guest(String token) { return guestView(read(token,true,false)); }
@@ -159,7 +168,7 @@ public class DeviceService {
         if (stored.ownerId!=null) {
             var owner=accounts.account(stored.ownerId); ownerEnabled=accounts.principal(owner.username()).enabled();
             ownerName=owner.displayName();
-            merchantName=jdbc.queryForObject("SELECT name FROM merchant WHERE user_id=?",String.class,stored.ownerId);
+            merchantName=jdbc.queryForObject("SELECT CASE WHEN name_explicit THEN name ELSE ? END FROM merchant WHERE user_id=?",String.class,ownerName,stored.ownerId);
         }
         if (!ownerEnabled) unavailable="设备尚未分配或所属商户已停用";
         else if (!type.enabled() || type.trialMinutes()==0) unavailable="该类型设备暂未开放试用";

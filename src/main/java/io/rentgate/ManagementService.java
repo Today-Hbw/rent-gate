@@ -88,8 +88,8 @@ public class ManagementService {
         var actor=accounts.actor();
         String scope=actor.admin()?"1=1":actor.provider()?"(m.user_id=? OR m.provider_id=?)":"m.user_id=?";
         Object[] params=actor.admin()?new Object[0]:actor.provider()?new Object[]{actor.id(),actor.id()}:new Object[]{actor.id()};
-        return jdbc.query("SELECT m.*,u.display_name AS owner_name FROM merchant m JOIN sys_user u ON u.id=m.user_id WHERE "+scope+" ORDER BY m.id",
-                (rs,row)->new Merchant(rs.getLong("id"),rs.getLong("user_id"),rs.getObject("provider_id",Long.class),rs.getString("name"),rs.getString("owner_name"),
+        return jdbc.query("SELECT m.*,u.display_name AS owner_name,CASE WHEN m.name_explicit THEN m.name ELSE u.display_name END AS current_name FROM merchant m JOIN sys_user u ON u.id=m.user_id WHERE "+scope+" ORDER BY m.id",
+                (rs,row)->new Merchant(rs.getLong("id"),rs.getLong("user_id"),rs.getObject("provider_id",Long.class),rs.getString("current_name"),rs.getString("owner_name"),
                 rs.getString("mch_type"),rs.getString("wechat_mch_id"),rs.getString("wechat_sub_mch_id"),rs.getString("alipay_app_id")),params);
     }
 
@@ -97,7 +97,7 @@ public class ManagementService {
         Merchant merchant=merchants().stream().filter(m->m.id==id).findFirst().orElseThrow(Db::missing);
         if (merchant.mchType.equals("user") && !mchId.isEmpty()) throw Db.bad("普通用户仅填写小微商户号，上级商户号由服务商管理");
         if (merchant.mchType.equals("provider") && !subMchId.isEmpty()) throw Db.bad("服务商应填写普通商户号，不填写小微商户号");
-        jdbc.update("UPDATE merchant SET name=?,wechat_mch_id=?,wechat_sub_mch_id=?,alipay_app_id=? WHERE id=?",name.strip(),mchId,subMchId,alipayId,id);
+        jdbc.update("UPDATE merchant SET name=?,name_explicit=?,wechat_mch_id=?,wechat_sub_mch_id=?,alipay_app_id=? WHERE id=?",name.strip(),!name.strip().equals(merchant.ownerName),mchId,subMchId,alipayId,id);
         return merchants().stream().filter(m->m.id==id).findFirst().orElseThrow(Db::missing);
     }
 

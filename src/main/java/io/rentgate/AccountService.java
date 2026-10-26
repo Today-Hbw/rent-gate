@@ -148,7 +148,7 @@ public class AccountService {
         if (target.role.equals("admin") || id == actor.id) throw Db.bad("当前账号请在个人设置中修改，不能停用管理员");
         jdbc.update("UPDATE sys_user SET display_name=?,enabled=?,auth_version=auth_version+1 WHERE id=?",displayName.strip(),enabled,id);
         // Keep the initial merchant label in sync; separately customized shop names stay intact.
-        jdbc.update("UPDATE merchant SET name=? WHERE user_id=? AND name=?",displayName.strip(),id,target.displayName);
+        jdbc.update("UPDATE merchant SET name=? WHERE user_id=? AND name_explicit=FALSE",displayName.strip(),id);
         return account(id);
     }
 

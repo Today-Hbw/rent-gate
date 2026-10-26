@@ -112,6 +112,10 @@ class RentalAccessTest {
     }
 
     @Test void existingQrReflectsCurrentOwnerAndDefaultMerchantNameWithoutReplacingCustomShopNames() {
+        // Historical account renames left a copied merchant label behind before name tracking existed.
+        jdbc.update("UPDATE merchant SET name='历史老板名' WHERE user_id=?",ownerA);
+        assertThat(devices.guest("public-a").merchantName()).isEqualTo("老板甲");
+        assertThat(management.merchants().stream().filter(m->m.userId()==ownerA).findFirst().orElseThrow().name()).isEqualTo("老板甲");
         accounts.update(ownerA,"老板甲改名",true);
         var renamed=devices.guest("public-a");
         assertThat(renamed.ownerName()).isEqualTo("老板甲改名");

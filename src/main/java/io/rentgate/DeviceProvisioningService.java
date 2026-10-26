@@ -23,7 +23,7 @@ public class DeviceProvisioningService {
     public record Pairing(String status,long expiresTs) {}
     public record PairResult(String status,String pairingCode,String deviceKey,long expiresTs) {}
     public record PairingCode(String code,long expiresTs) {}
-    public record Enrollment(String deviceId,String deviceKey) {}
+    public record Enrollment(String deviceId,String deviceKey,String deviceName) {}
     private record Session(String tokenHash,String code,long expires,boolean approved,int attempts,String enrollmentHash,String hardwareId) {}
     private long now() { return clock.instant().getEpochSecond(); }
 
@@ -42,6 +42,7 @@ public class DeviceProvisioningService {
     }
     @Transactional public Setup requestSetup(String id) {
         var device=lockAuthorized(id); idle(device);
+        if (device.setupState().equals("closing")) throw Db.conflict("正在结束配网，请等待设备确认后再进入");
         if (device.setupPending()) return jdbc.queryForObject("SELECT CASE WHEN setup_requested_ts>? THEN setup_request_id END AS request_id,setup_requested_ts FROM device WHERE device_id=?",
                 (rs,row)->new Setup(rs.getString(1),rs.getString(1)==null?now()+180:rs.getLong(2)+300),now()-300,id);
         if (!device.online()) throw Db.conflict("设备离线；连接失败后会自动打开配网热点");
@@ -52,6 +53,8 @@ public class DeviceProvisioningService {
     }
     @Transactional public Setup closeSetup(String id) {
         var device=lockAuthorized(id);
+        if (device.setupState().equals("closing")) return jdbc.queryForObject("SELECT setup_close_id,setup_close_ts FROM device WHERE device_id=?",
+                (rs,row)->new Setup(rs.getString(1),rs.getLong(2)+300),id);
         String[] version=device.firmwareVersion().split("\\.");
         boolean supported=false;
         try { supported=version.length>=2 && (Integer.parseInt(version[0])>0 || Integer.parseInt(version[1])>=3); } catch (NumberFormatException ignored) { }
@@ -87,9 +90,10 @@ public class DeviceProvisioningService {
         if (pairing.tokenHash!=null && (!pairing.tokenHash.equals(tokenHash) || !hardware.equals(pairing.hardwareId))) throw invalidCode(address);
         if (!pairing.approved) {
             devices.replaceKey(id,devices.newKey());
+            jdbc.update("UPDATE device SET hardware_id=? WHERE device_id=?",hardware,id);
             jdbc.update("UPDATE device_pairing SET token_hash=?,hardware_id=?,approved=TRUE WHERE device_id=?",tokenHash,hardware,id);
         }
-        return new Enrollment(id,devicesKey(id));
+        return new Enrollment(id,devicesKey(id),jdbc.queryForObject("SELECT name FROM device WHERE device_id=?",String.class,id));
     }
     private ResponseStatusException invalidCode(String address) {
         limiter.failed(address);
