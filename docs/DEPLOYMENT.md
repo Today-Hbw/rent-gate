@@ -6,7 +6,7 @@
 
 本地运行 `mvnw verify`，将以下文件通过 SSH/SCP 上传到服务器的专用目录：
 
-- `target/rent-gate-0.1.0.jar` → `releases/<版本>/app.jar`
+- `target/rent-gate-0.2.0.jar` → `releases/<版本>/app.jar`
 - `deploy/Dockerfile.runtime` → `releases/<版本>/Dockerfile`
 - `deploy/compose.yml` → `config/compose.yml`
 
@@ -41,7 +41,9 @@ curl --fail http://127.0.0.1:8080/health
 
 腾讯云安全组需允许选定的访问端口。若使用其他端口，只修改 `.env` 的 `RENT_GATE_HTTP_PORT` 后重新 `up -d`，固件配网时也填写对应端口。
 
-管理员账号为 `admin`，`config/.env` 中的密码仅用于首次创建账号。初始化后密码保存在数据库，后台修改密码后重启仍保留，不会被环境变量覆盖。设备密钥只能从后台创建/重置时获得。当前固件使用 HTTP；公网长期设备接入需后续补充 HTTPS 及证书校验。
+管理员账号为 `admin`，`config/.env` 中的密码仅用于首次创建账号。初始化后密码保存在数据库，后台修改密码后重启仍保留，不会被环境变量覆盖。设备密钥可在权限内点击“查看密钥”，或通过手机短码配对自动下发。当前固件使用 HTTP；公网长期设备接入需后续补充 HTTPS 及证书校验。
+
+v0.2.0 的 V3 迁移保留旧密钥摘要和到期时间，增加配网命令、配对窗口和加密密钥列。旧设备成功认证一次后自动补存可查看密钥，不会强制轮换。`/app/data/device-key-encryption.key` 首次启动自动生成在既有数据卷，必须连同数据库备份；丢失该文件将无法解密已保存的密钥。后台部署不会替设备烧录，按需配网与免手填配对需要另行刷入 v0.2.0 固件。
 
 ## 日常检查
 

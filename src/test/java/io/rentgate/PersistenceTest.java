@@ -39,6 +39,7 @@ class PersistenceTest {
             var poll = service.poll("persistent-001", key, false);
             assertThat(poll.action()).isEqualTo("on");
             assertThat(poll.expireTs()).isEqualTo(expiry);
+            assertThat(service.credentials("persistent-001").deviceKey()).isEqualTo(key);
             var account=second.getBean(AccountService.class).principal("admin");
             var encoder=second.getBean(org.springframework.security.crypto.password.PasswordEncoder.class);
             assertThat(encoder.matches("Changed123",account.passwordHash())).isTrue();
@@ -65,6 +66,7 @@ class PersistenceTest {
         try(var upgraded=start(url)) {
             var service=upgraded.getBean(DeviceService.class);
             assertThat(service.poll("legacy-001",key,false).expireTs()).isEqualTo(expiry);
+            assertThat(service.credentials("legacy-001").deviceKey()).isEqualTo(key);
             var device=service.device("legacy-001");
             assertThat(device.userId()).isNull();
             assertThat(device.publicToken()).isNotBlank();

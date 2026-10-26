@@ -28,3 +28,6 @@ spring:
       accept-float-as-int: false
   mvc:
     log-resolved-exception: false
+rent-gate:
+  key-encryption-key: ${RENT_GATE_KEY_ENCRYPTION_KEY:}
+  key-file: ${RENT_GATE_KEY_FILE:./data/device-key-encryption.key}

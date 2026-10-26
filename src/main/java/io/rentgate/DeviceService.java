@@ -24,15 +24,16 @@ public class DeviceService {
     private final Clock clock;
     private final AccountService accounts;
     private final ManagementService management;
+    private final DeviceKeyVault vault;
     private final SecureRandom random=new SecureRandom();
-    public DeviceService(JdbcTemplate jdbc,Clock clock,AccountService accounts,ManagementService management) {
-        this.jdbc=jdbc; this.clock=clock; this.accounts=accounts; this.management=management;
+    public DeviceService(JdbcTemplate jdbc,Clock clock,AccountService accounts,ManagementService management,DeviceKeyVault vault) {
+        this.jdbc=jdbc; this.clock=clock; this.accounts=accounts; this.management=management; this.vault=vault;
     }
     public record Device(String deviceId,String name,String status,long expireTs,Long lastSeenTs,Boolean relayOn,boolean online,long remainingSeconds,
                          Long userId,String ownerName,Long providerId,String providerName,Long merchantId,long deviceTypeId,String typeName,boolean enabled,
-                         String runSource,Long trialUsedAt,long cooldownUntil,String publicToken) {}
+                         String runSource,Long trialUsedAt,long cooldownUntil,String publicToken,String firmwareVersion,boolean setupPending) {}
     public record Credentials(String deviceId,String deviceKey,String publicToken) {}
-    public record Poll(String action,long expireTs,long serverTs,long remainingSeconds) {}
+    public record Poll(String action,long expireTs,long serverTs,long remainingSeconds,String configRequestId) {}
     public record GuestDevice(String name,String merchantName,String typeName,String status,boolean online,long serverTs,long expireTs,long remainingSeconds,
                               int trialMinutes,int cooldownMinutes,long cooldownUntil,long cooldownRemainingSeconds,boolean trialAvailable,String trialUnavailableReason,
                               boolean paymentEnabled,List<ManagementService.PublicPlan> plans,String siteName,String guestNotice) {}
@@ -66,7 +67,8 @@ public class DeviceService {
             long expiry=rs.getLong("expire_ts"); Long seen=rs.getObject("last_seen_ts",Long.class); boolean on=rs.getBoolean("enabled") && expiry>now;
             return new Device(rs.getString("device_id"),rs.getString("name"),on?"on":"off",expiry,seen,rs.getObject("relay_on",Boolean.class),seen!=null && now-seen<=timeout,on?expiry-now:0,
                     rs.getObject("user_id",Long.class),rs.getString("owner_name"),rs.getObject("provider_id",Long.class),rs.getString("provider_name"),rs.getObject("merchant_id",Long.class),
-                    rs.getLong("device_type_id"),rs.getString("type_name"),rs.getBoolean("enabled"),rs.getString("run_source"),rs.getObject("trial_used_at",Long.class),rs.getLong("cooldown_until"),rs.getString("public_token"));
+                    rs.getLong("device_type_id"),rs.getString("type_name"),rs.getBoolean("enabled"),rs.getString("run_source"),rs.getObject("trial_used_at",Long.class),rs.getLong("cooldown_until"),rs.getString("public_token"),
+                    rs.getString("firmware_version"),rs.getString("setup_request_id")!=null && rs.getLong("setup_requested_ts")>now-300);
         },params);
     }
 
@@ -77,7 +79,7 @@ public class DeviceService {
         String key=newKey(),token=UUID.randomUUID().toString();
         Long merchant=ownerId==null?null:jdbc.queryForObject("SELECT id FROM merchant WHERE user_id=?",Long.class,ownerId);
         try {
-            jdbc.update("INSERT INTO device(device_id,name,key_hash,created_ts,user_id,merchant_id,device_type_id,public_token) VALUES(?,?,?,?,?,?,?,?)",id,name.strip(),hash(key),now(),ownerId,merchant,typeId,token);
+            jdbc.update("INSERT INTO device(device_id,name,key_hash,key_cipher,created_ts,user_id,merchant_id,device_type_id,public_token) VALUES(?,?,?,?,?,?,?,?,?)",id,name.strip(),hash(key),vault.encrypt(id,key),now(),ownerId,merchant,typeId,token);
         } catch (DuplicateKeyException error) { throw Db.conflict("设备编号已存在"); }
         return new Credentials(id,key,token);
     }
@@ -99,6 +101,7 @@ public class DeviceService {
 
     @Transactional public Device release(String id,int minutes) {
         Stored stored=read(id,false,true); authorize(stored); if (!stored.enabled) throw Db.conflict("设备已停用");
+        ensureNotProvisioning(id);
         jdbc.update("UPDATE device SET status='on',expire_ts=?,run_source='manual' WHERE device_id=?",now()+minutes*60L,id); return device(id);
     }
     @Transactional public Device stop(String id) {
@@ -106,19 +109,38 @@ public class DeviceService {
         jdbc.update("UPDATE device SET status='off',expire_ts=0 WHERE device_id=?",id); return device(id);
     }
     @Transactional public Credentials rotateKey(String id) {
-        Stored stored=read(id,false,true); authorize(stored); String key=newKey(); jdbc.update("UPDATE device SET key_hash=? WHERE device_id=?",hash(key),id);
+        Stored stored=read(id,false,true); authorize(stored); String key=newKey(); replaceKey(id,key);
+        jdbc.update("DELETE FROM device_pairing WHERE device_id=?",id);
         return new Credentials(id,key,stored.token);
     }
 
+    public Credentials credentials(String id) {
+        Stored stored=read(id,false,false); authorize(stored);
+        return new Credentials(id,vault.decrypt(id,jdbc.queryForObject("SELECT key_cipher FROM device WHERE device_id=?",String.class,id)),stored.token);
+    }
+
+    void replaceKey(String id,String key) {
+        jdbc.update("UPDATE device SET key_hash=?,key_cipher=? WHERE device_id=?",hash(key),vault.encrypt(id,key),id);
+    }
+
     @Transactional public Poll poll(String id,String key,Boolean relayOn) {
+        return poll(id,key,relayOn,null,null);
+    }
+
+    @Transactional public Poll poll(String id,String key,Boolean relayOn,String configAck,String firmwareVersion) {
         Stored stored;
         try { stored=read(id,false,true); } catch (ResponseStatusException error) { throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"设备认证失败"); }
         if (key==null || key.length()>128 || !MessageDigest.isEqual(stored.hash.getBytes(StandardCharsets.UTF_8),hash(key).getBytes(StandardCharsets.UTF_8))) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"设备认证失败");
         }
         long now=now(); boolean on=stored.enabled && stored.expiry>now;
+        // Recover viewable legacy keys only after successful authentication.
+        jdbc.update("UPDATE device SET key_cipher=? WHERE device_id=? AND key_cipher IS NULL",vault.encrypt(id,key),id);
+        if (firmwareVersion!=null) jdbc.update("UPDATE device SET firmware_version=? WHERE device_id=?",firmwareVersion,id);
+        if (configAck!=null) jdbc.update("UPDATE device SET setup_request_id=NULL,setup_requested_ts=NULL WHERE device_id=? AND setup_request_id=?",id,configAck);
         jdbc.update("UPDATE device SET status=?,last_seen_ts=?,relay_on=? WHERE device_id=?",on?"on":"off",now,relayOn,id);
-        return new Poll(on?"on":"off",stored.expiry,now,on?stored.expiry-now:0);
+        String command=jdbc.queryForObject("SELECT CASE WHEN setup_requested_ts>? THEN setup_request_id ELSE NULL END FROM device WHERE device_id=?",String.class,now-300,id);
+        return new Poll(on?"on":"off",stored.expiry,now,on?stored.expiry-now:0,command);
     }
 
     public GuestDevice guest(String token) { return guestView(read(token,true,false)); }
@@ -133,6 +155,7 @@ public class DeviceService {
         }
         if (!ownerEnabled) unavailable="设备尚未分配或所属商户已停用";
         else if (!type.enabled() || type.trialMinutes()==0) unavailable="该类型设备暂未开放试用";
+        else if (provisioningActive(stored.id)) unavailable="设备正在配网或配对，请稍后重试";
         else if (!online) unavailable="设备离线，请稍后重试或联系老板";
         else if (stored.expiry>now) unavailable="设备正在使用中";
         else if (stored.cooldown>now) unavailable="设备正在试用冷却期内";
@@ -144,13 +167,21 @@ public class DeviceService {
     @Transactional public GuestDevice trial(String token) {
         Stored stored=read(token,true,true); GuestDevice before=guestView(stored);
         if (!before.trialAvailable) throw Db.conflict(before.trialUnavailableReason);
+        ensureNotProvisioning(stored.id);
         long now=now(),expiry=now+before.trialMinutes*60L,cooldown=expiry+before.cooldownMinutes*60L;
         jdbc.update("UPDATE device SET status='on',expire_ts=?,run_source='trial',trial_used_at=?,cooldown_until=? WHERE device_id=?",expiry,now,cooldown,stored.id);
         return guestView(read(token,true,false));
     }
 
-    private String newKey() { byte[] bytes=new byte[32]; random.nextBytes(bytes); return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes); }
-    private String hash(String key) {
+    private void ensureNotProvisioning(String id) {
+        if (provisioningActive(id)) throw Db.conflict("设备正在配网或配对，请完成后再运行");
+    }
+    private boolean provisioningActive(String id) {
+        int active=jdbc.queryForObject("SELECT COUNT(*) FROM device WHERE device_id=? AND ((setup_request_id IS NOT NULL AND setup_requested_ts>?) OR EXISTS (SELECT 1 FROM device_pairing p WHERE p.device_id=device.device_id AND p.expires_ts>? AND p.approved=FALSE))",Integer.class,id,now()-300,now());
+        return active>0;
+    }
+    String newKey() { byte[] bytes=new byte[32]; random.nextBytes(bytes); return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes); }
+    static String hash(String key) {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8))); }
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }

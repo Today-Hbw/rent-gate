@@ -26,11 +26,11 @@ public class SecurityConfig {
     SecurityFilterChain security(HttpSecurity http,AccountService accounts) throws Exception {
         return http
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/poll", "/health", "/login", "/assets/**", "/error", "/r/**", "/api/public/**").permitAll()
+                        .requestMatchers("/poll", "/device/pair", "/health", "/login", "/assets/**", "/error", "/r/**", "/api/public/**").permitAll()
                         .requestMatchers("/admin/accounts/**").hasAnyRole("ADMIN","PROVIDER")
                         .anyRequest().authenticated())
                 .addFilterAfter(new SessionGuard(accounts),UsernamePasswordAuthenticationFilter.class)
-                .csrf(csrf -> csrf.ignoringRequestMatchers(PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, "/poll")))
+                .csrf(csrf -> csrf.ignoringRequestMatchers(PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, "/poll"),PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST,"/device/pair")))
                 .formLogin(form -> form.loginPage("/login").defaultSuccessUrl("/", true).permitAll())
                 .logout(logout -> logout.logoutSuccessUrl("/login?logout"))
                 .exceptionHandling(errors -> errors.defaultAuthenticationEntryPointFor(

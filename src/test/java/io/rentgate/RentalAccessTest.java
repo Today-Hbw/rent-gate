@@ -32,6 +32,7 @@ class RentalAccessTest {
     @Autowired ObjectMapper json;
     @Autowired ManagementService management;
     @Autowired TestClock clock;
+    @Autowired DeviceProvisioningService provisioning;
     long providerA,providerB,ownerA,ownerB;
     String keyA;
 
@@ -74,8 +75,22 @@ class RentalAccessTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM rental_order",Integer.class)).isZero();
     }
 
+    @Test void pairingWindowBlocksGuestTrialAndManualReleaseUntilCompletedOrExpired() throws Exception {
+        provisioning.beginPairing("device-a");
+        mvc.perform(get("/api/public/devices/public-a").with(anonymous())).andExpect(jsonPath("$.trial_available").value(false));
+        mvc.perform(post("/api/public/devices/public-a/trial").with(anonymous()).with(csrf())).andExpect(status().isConflict());
+        mvc.perform(post("/admin/release").with(user("owner_a").roles("USER")).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"device_id\":\"device-a\",\"duration_min\":1}")).andExpect(status().isConflict());
+        clock.seconds+=300;jdbc.update("UPDATE device SET last_seen_ts=? WHERE device_id='device-a'",clock.seconds);
+        assertThat(devices.guest("public-a").trialAvailable()).isTrue();
+    }
+
     @Test void ownerAndProviderOnlySeeTheirOwnDevicesAndCannotControlOtherDevices() throws Exception {
         for (String role:new String[]{"owner_a","provider_a"}) {
+            mvc.perform(get("/admin/devices/device-b/credentials").with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER"))).andExpect(status().isNotFound());
+            mvc.perform(get("/admin/devices/device-a/credentials").with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER"))).andExpect(status().isOk()).andExpect(jsonPath("$.device_key").value(keyA));
+            for(String endpoint:new String[]{"setup","pairing","pairing/confirm"}) mvc.perform(post("/admin/devices/device-b/"+endpoint).with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER")).with(csrf())
+                    .contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"123456\"}")).andExpect(status().isNotFound());
             mvc.perform(get("/admin/devices").with(user(role).roles(role.startsWith("owner")?"USER":"PROVIDER")))
                     .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1)).andExpect(jsonPath("$[0].device_id").value("device-a"));
             for (String endpoint:new String[]{"release","stop","rotate-key"}) {

@@ -5,6 +5,9 @@
 #include <LittleFS.h>
 #include <Ticker.h>
 #include <WiFiManager.h>
+extern "C" {
+#include <user_interface.h>
+}
 #include "LeaseTimer.h"
 #include "NetworkRecovery.h"
 
@@ -18,10 +21,21 @@
 static char serverUrl[121] = "";
 static char deviceId[65] = "";
 static char deviceKey[65] = "";
+static char pairingToken[44] = "";
+static char pairingCode[7] = "";
+static const char* pairingStatus = "waiting";
+static char configAck[37] = "";
 static WiFiManager wifi;
-static WiFiManagerParameter serverParam("server", "Server HTTP URL (e.g. http://192.168.1.10:8080)", "", 120);
-static WiFiManagerParameter idParam("device", "Device ID", "", 64);
-static WiFiManagerParameter keyParam("key", "Device key", "", 64, "type=\"password\"");
+static WiFiManagerParameter serverParam("server", "服务器 HTTP 地址（如 http://192.168.1.10:8080）", "", 120);
+static WiFiManagerParameter idParam("device", "设备编号", "", 64);
+static WiFiManagerParameter keyParam("key", "设备密钥（可选，留空后在管理后台配对）", "", 64, "type=\"password\"");
+static WiFiManagerParameter pairingHelp(
+    "<div id='pairing-info'>密钥可留空。保存 WiFi、服务器地址和设备编号后，在管理后台点击“配对”，再回到此页面查看 6 位配对码。</div>"
+    "<script>setInterval(function(){fetch('/pairing-status').then(r=>r.json()).then(s=>{"
+    "document.getElementById('pairing-info').textContent=s.code?'配对码：'+s.code+'（窗口有效期 5 分钟）。请在管理后台输入并确认。':"
+    "s.status==='busy'?'其他设备正在请求配对，请在窗口过期后重新配对。':"
+    "s.status==='saved'?'配对已保存，请将手机切回可上网的网络。':'等待配对：请先留空密钥保存配置，再到管理后台点击“配对”。';"
+    "}).catch(()=>{});},2000);</script>");
 static constexpr char setupPassword[] = "RentGate888";
 static Ticker cutoff;
 static LeaseTimer lease;
@@ -44,7 +58,7 @@ static bool validConfig(const char* server, const char* id, const char* key) {
   // No query/fragment/userinfo: all credentials travel only in the header.
   if (url.indexOf('?') >= 0 || url.indexOf('#') >= 0 || url.indexOf('@') >= 0 || url.indexOf(' ') >= 0) return false;
   size_t length = strlen(id);
-  if (!length || length > 64 || strlen(key) != 43) return false;
+  if (!length || length > 64 || (strlen(key) != 0 && strlen(key) != 43)) return false;
   for (size_t i = 0; i < length; ++i) {
     char c = id[i];
     if (!isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') return false;
@@ -66,6 +80,27 @@ static void loadConfig() {
   strlcpy(serverUrl, server, sizeof(serverUrl));
   strlcpy(deviceId, id, sizeof(deviceId));
   strlcpy(deviceKey, key, sizeof(deviceKey));
+  const char* token = doc["pairing_token"] | "";
+  if (strlen(token) == 43) strlcpy(pairingToken, token, sizeof(pairingToken));
+}
+
+static void newPairingToken() {
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+  for (size_t i = 0; i < sizeof(pairingToken) - 1; ++i) pairingToken[i] = alphabet[os_random() & 63];
+  pairingToken[43] = '\0';
+  pairingCode[0] = '\0';
+  pairingStatus = "waiting";
+}
+
+static bool writeConfig(const char* server, const char* id, const char* key, const char* token) {
+  if (!fsReady) { wifi.setTitle("RentGate - Storage unavailable"); return false; }
+  StaticJsonDocument<512> doc;
+  doc["server"] = server; doc["device"] = id; doc["key"] = key; doc["pairing_token"] = token;
+  File file = LittleFS.open("/config.tmp", "w");
+  if (!file || !serializeJson(doc, file)) { wifi.setTitle("RentGate - Save failed; retry"); return false; }
+  file.close();
+  if (!LittleFS.rename("/config.tmp", "/config.json")) { wifi.setTitle("RentGate - Save failed; retry"); return false; }
+  return true;
 }
 
 static bool saveConfig() {
@@ -74,17 +109,13 @@ static bool saveConfig() {
   const char* id = idParam.getValue();
   const char* key = keyParam.getValue();
   if (!validConfig(server, id, key)) {
-    Serial.println("Invalid config. Correct HTTP URL, device ID and 43-character key in the phone setup page.");
+    Serial.println("Invalid config. Correct HTTP URL, device ID and optional 43-character key in phone setup.");
     wifi.setTitle("RentGate - Invalid settings; correct and save again");
     return false;
   }
-  if (!fsReady) { Serial.println("Cannot persist config: filesystem unavailable."); return false; }
-  StaticJsonDocument<512> doc;
-  doc["server"] = server; doc["device"] = id; doc["key"] = key;
-  File file = LittleFS.open("/config.tmp", "w");
-  if (!file || !serializeJson(doc, file)) { Serial.println("Config write failed."); return false; }
-  file.close();
-  if (!LittleFS.rename("/config.tmp", "/config.json")) { Serial.println("Config save failed."); return false; }
+  if (!*key && (!*pairingToken || strcmp(id, deviceId) != 0 || *deviceKey)) newPairingToken();
+  if (*key) { pairingToken[0] = '\0'; pairingCode[0] = '\0'; }
+  if (!writeConfig(server, id, key, pairingToken)) return false;
   strlcpy(serverUrl, server, sizeof(serverUrl));
   while (strlen(serverUrl) > 7 && serverUrl[strlen(serverUrl) - 1] == '/') serverUrl[strlen(serverUrl) - 1] = '\0';
   strlcpy(deviceId, id, sizeof(deviceId));
@@ -103,7 +134,7 @@ static void startPortal() {
 }
 
 static void maintainNetwork() {
-  bool configured = validConfig(serverUrl, deviceId, deviceKey);
+  bool configured = validConfig(serverUrl, deviceId, deviceKey) && strlen(deviceKey) == 43;
   // With no saved SSID there is nothing to wait for on first boot.
   bool hasSavedWifi = WiFi.SSID().length() > 0;
   NetworkRecovery::Action action = networkRecovery.update(
@@ -128,17 +159,53 @@ static void maintainNetwork() {
   }
 }
 
+static void pollPairing() {
+  if (WiFi.status() != WL_CONNECTED || *deviceKey || !validConfig(serverUrl, deviceId, deviceKey)) return;
+  if (!*pairingToken) {
+    newPairingToken();
+    if (!writeConfig(serverUrl, deviceId, deviceKey, pairingToken)) return;
+  }
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(1500);
+  if (!http.begin(client, String(serverUrl) + "/device/pair")) return;
+  http.addHeader("Content-Type", "application/json");
+  StaticJsonDocument<192> request;
+  request["device_id"] = deviceId; request["token"] = pairingToken;
+  String body; serializeJson(request, body);
+  if (http.POST(body) == HTTP_CODE_OK && http.getSize() <= 512) {
+    StaticJsonDocument<512> response;
+    if (!deserializeJson(response, http.getString())) {
+      const char* status = response["status"] | "waiting";
+      const char* code = response["pairing_code"] | "";
+      strlcpy(pairingCode, strlen(code) == 6 ? code : "", sizeof(pairingCode));
+      pairingStatus = strcmp(status, "busy") == 0 ? "busy" : "waiting";
+      const char* key = response["device_key"] | "";
+      if (strcmp(status, "approved") == 0 && strlen(key) == 43 && writeConfig(serverUrl, deviceId, key, "")) {
+        strlcpy(deviceKey, key, sizeof(deviceKey));
+        keyParam.setValue(deviceKey, 64);
+        pairingToken[0] = '\0'; pairingCode[0] = '\0';
+        pairingStatus = "saved"; needsSetup = false;
+        Serial.println("Pairing complete. Device key saved.");
+      }
+    }
+  }
+  http.end();
+}
+
 static void pollServer() {
-  if (wifi.getConfigPortalActive() || WiFi.status() != WL_CONNECTED || !validConfig(serverUrl, deviceId, deviceKey)) return;
+  if (wifi.getConfigPortalActive() || WiFi.status() != WL_CONNECTED || strlen(deviceKey) != 43 || !validConfig(serverUrl, deviceId, deviceKey)) return;
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(1500);
   if (!http.begin(client, String(serverUrl) + "/poll")) return;
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-Device-Key", deviceKey);
-  StaticJsonDocument<192> request;
+  StaticJsonDocument<256> request;
   request["device_id"] = deviceId;
   request["relay_on"] = relayOn;
+  request["firmware_version"] = "0.2.0";
+  if (*configAck) request["config_ack"] = configAck;
   String body;
   serializeJson(request, body);
   uint32_t sent = millis();
@@ -149,6 +216,11 @@ static void pollServer() {
     StaticJsonDocument<512> response;
     if (!deserializeJson(response, payload)) {
       const char* action = response["action"] | "";
+      const char* configRequest = response["config_request_id"] | "";
+      if (strlen(configRequest) == 36 && strcmp(configRequest, configAck) != 0) {
+        strlcpy(configAck, configRequest, sizeof(configAck));
+        needsSetup = true;
+      }
       if (strcmp(action, "off") == 0) {
         cutoff.detach(); lease.stop(); relayOff();
       } else if (strcmp(action, "on") == 0 && response["expire_ts"].is<int64_t>() && response["server_ts"].is<int64_t>()) {
@@ -188,6 +260,16 @@ void setup() {
   idParam.setValue(deviceId, 64);
   keyParam.setValue(deviceKey, 64);
   wifi.addParameter(&serverParam); wifi.addParameter(&idParam); wifi.addParameter(&keyParam);
+  wifi.addParameter(&pairingHelp);
+  wifi.setWebServerCallback([]() {
+    wifi.server->on("/pairing-status", HTTP_GET, []() {
+      StaticJsonDocument<128> doc;
+      doc["status"] = pairingStatus; doc["code"] = pairingCode;
+      String body; serializeJson(doc, body);
+      wifi.server->sendHeader("Cache-Control", "no-store");
+      wifi.server->send(200, "application/json", body);
+    });
+  });
   wifi.setSaveParamsCallback([]() { shouldSave = true; });
   wifi.setConfigPortalBlocking(false);
   wifi.setConfigPortalTimeout(0);
@@ -216,6 +298,6 @@ void loop() {
     startPortal();
   }
   maintainNetwork();
-  if (millis() - lastPoll >= 3000) { lastPoll = millis(); pollServer(); }
+  if (millis() - lastPoll >= 3000) { lastPoll = millis(); pollPairing(); pollServer(); }
   delay(5);
 }

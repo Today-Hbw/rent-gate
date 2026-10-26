@@ -34,6 +34,7 @@ class DeviceIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired DeviceService service;
     @Autowired MutableClock clock;
+    @Autowired DeviceProvisioningService provisioning;
 
     static class MutableClock extends Clock {
         volatile long seconds = 1700000000;
@@ -199,5 +200,102 @@ class DeviceIntegrationTest {
             for (var result : pool.invokeAll(tasks)) result.get();
         } finally { pool.shutdownNow(); }
         assertThat(service.poll("demo-001", key, true).remainingSeconds()).isEqualTo(1800);
+    }
+
+    @Test void viewableKeysAreEncryptedAndLegacyKeysBackfillAfterAuthenticatedPoll() throws Exception {
+        String key=create().get("device_key").asText();
+        assertThat(jdbc.queryForObject("SELECT key_cipher FROM device",String.class)).doesNotContain(key);
+        mvc.perform(get("/admin/devices/demo-001/credentials")).andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control","no-store")).andExpect(jsonPath("$.device_key").value(key));
+        jdbc.update("UPDATE device SET key_cipher=NULL");
+        mvc.perform(get("/admin/devices/demo-001/credentials")).andExpect(jsonPath("$.device_key").isEmpty());
+        mvc.perform(post("/poll").with(anonymous()).header("X-Device-Key","bad").contentType(MediaType.APPLICATION_JSON).content("{\"device_id\":\"demo-001\"}"))
+                .andExpect(status().isUnauthorized());
+        assertThat(jdbc.queryForObject("SELECT key_cipher FROM device",String.class)).isNull();
+        service.poll("demo-001",key,false);
+        asAdmin();
+        assertThat(service.credentials("demo-001").deviceKey()).isEqualTo(key);
+        mvc.perform(get("/admin/devices/demo-001/credentials").with(anonymous())).andExpect(status().isUnauthorized());
+    }
+
+    @Test void setupRequiresIdleOnlineSupportedFirmwareAndIsRetriedUntilAcknowledged() throws Exception {
+        String key=create().get("device_key").asText();
+        mvc.perform(post("/admin/devices/demo-001/setup").with(csrf())).andExpect(status().isConflict());
+        service.poll("demo-001",key,false);
+        mvc.perform(post("/admin/devices/demo-001/setup").with(csrf())).andExpect(status().isConflict());
+        service.poll("demo-001",key,false,null,"0.2.0");
+        release(1);
+        mvc.perform(post("/admin/devices/demo-001/setup").with(csrf())).andExpect(status().isConflict());
+        asAdmin();
+        service.stop("demo-001");
+        String request=provisioning.requestSetup("demo-001").requestId();
+        assertThat(provisioning.requestSetup("demo-001").requestId()).isEqualTo(request);
+        assertThat(service.poll("demo-001",key,false).configRequestId()).isEqualTo(request);
+        assertThat(service.poll("demo-001",key,false,"wrong",null).configRequestId()).isEqualTo(request);
+        mvc.perform(post("/admin/release").with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"device_id\":\"demo-001\",\"duration_min\":1}"))
+                .andExpect(status().isConflict());
+        assertThat(service.poll("demo-001",key,false,request,null).configRequestId()).isNull();
+        asAdmin();
+        String next=provisioning.requestSetup("demo-001").requestId();
+        assertThat(next).isNotEqualTo(request); clock.seconds+=300;
+        assertThat(service.poll("demo-001",key,false).configRequestId()).isNull();
+    }
+
+    private JsonNode pair(String token) throws Exception {
+        JsonNode result=json.readTree(mvc.perform(post("/device/pair").with(anonymous()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(java.util.Map.of("device_id","demo-001","token",token))))
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store")).andReturn().getResponse().getContentAsString());
+        asAdmin();return result;
+    }
+    private void asAdmin() {
+        org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(
+                new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("admin","",java.util.List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_ADMIN"))));
+    }
+
+    @Test void pairingNeedsExplicitWindowPhysicalCodeAndMatchingSecretToken() throws Exception {
+        String old=create().get("device_key").asText(), token="a".repeat(43), other="b".repeat(43);
+        assertThat(pair(token).get("status").asText()).isEqualTo("waiting");
+        provisioning.beginPairing("demo-001");
+        JsonNode pending=pair(token); String code=pending.get("pairing_code").asText();
+        assertThat(code).matches("[0-9]{6}");assertThat(pending.get("device_key").isNull()).isTrue();
+        assertThat(pair(other).get("status").asText()).isEqualTo("busy");
+        String wrong=code.equals("000000")?"111111":"000000";
+        mvc.perform(post("/admin/devices/demo-001/pairing/confirm").with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\""+wrong+"\"}"))
+                .andExpect(status().isBadRequest());
+        assertThat(jdbc.queryForObject("SELECT failed_attempts FROM device_pairing",Integer.class)).isEqualTo(1);
+        asAdmin();
+        provisioning.confirmPairing("demo-001",code);
+        String key=pair(token).get("device_key").asText();assertThat(key).hasSize(43).isNotEqualTo(old);
+        provisioning.confirmPairing("demo-001",code);assertThat(pair(token).get("device_key").asText()).isEqualTo(key);
+        assertThat(pair(other).get("device_key").isNull()).isTrue();
+        assertThat(service.credentials("demo-001").deviceKey()).isEqualTo(key);
+        assertThat(service.poll("demo-001",key,false).action()).isEqualTo("off");
+        mvc.perform(post("/poll").with(anonymous()).header("X-Device-Key",old).contentType(MediaType.APPLICATION_JSON).content("{\"device_id\":\"demo-001\"}"))
+                .andExpect(status().isUnauthorized());
+        clock.seconds+=300;assertThat(pair(token).get("device_key").isNull()).isTrue();
+    }
+
+    @Test void pairingExpiryAttemptLimitAndRotationRevokePendingSecrets() throws Exception {
+        create();asAdmin();provisioning.beginPairing("demo-001");String token="x".repeat(43),code=pair(token).get("pairing_code").asText();
+        String wrong=code.equals("000000")?"111111":"000000";
+        for(int i=0;i<5;i++) mvc.perform(post("/admin/devices/demo-001/pairing/confirm").with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\""+wrong+"\"}"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(post("/admin/devices/demo-001/pairing/confirm").with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\""+code+"\"}"))
+                .andExpect(status().isConflict());
+        assertThat(pair(token).get("status").asText()).isEqualTo("waiting");
+        provisioning.beginPairing("demo-001");pair(token);service.rotateKey("demo-001");
+        assertThat(pair(token).get("status").asText()).isEqualTo("waiting");
+    }
+
+    @Test void provisioningAdminWritesRequireCsrfAndPublicPairingValidatesTokens() throws Exception {
+        create();
+        for(String endpoint:new String[]{"setup","pairing","pairing/confirm"}) {
+            mvc.perform(post("/admin/devices/demo-001/"+endpoint).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"123456\"}"))
+                    .andExpect(status().isForbidden());
+            mvc.perform(post("/admin/devices/demo-001/"+endpoint).with(anonymous()).with(csrf()).contentType(MediaType.APPLICATION_JSON).content("{\"code\":\"123456\"}"))
+                    .andExpect(status().isUnauthorized());
+        }
+        mvc.perform(post("/device/pair").with(anonymous()).contentType(MediaType.APPLICATION_JSON).content("{\"device_id\":\"demo-001\",\"token\":\"short\"}"))
+                .andExpect(status().isBadRequest());
     }
 }

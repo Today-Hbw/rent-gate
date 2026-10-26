@@ -87,7 +87,7 @@ function deviceRows() {
     `<strong>${esc(d.name)}</strong><small class="mono">${esc(d.device_id)}</small>`,`${esc(d.owner_name||'未分配')}<small>${esc(d.type_name)} · ${esc(d.provider_name||'平台')}</small>`,
     badge(d.online?'在线':'离线',d.online?'green':'')+(!d.enabled?' '+badge('已停用','orange'):'')+`<small>心跳 ${esc(time(d.last_seen_ts))}</small>`,
     badge(d.status==='on'?(d.run_source==='trial'?'试用中':'手动运行'):'待机',d.status==='on'?'green':'')+`<small class="mono">${duration(d.remaining_seconds)}</small><small>继电器回报：${d.relay_on===null?'尚无':d.relay_on?'通电':'断电'}</small>`,
-    `<div class="row-actions">${d.enabled?action('release',d.device_id,'放行'):''}${action('stop',d.device_id,'停止','danger')}${action('edit',d.device_id,'编辑','subtle')}${action('qr',d.device_id,'二维码','subtle')}${action('key',d.device_id,'重设密钥','subtle')}</div>`]));
+    `<div class="row-actions">${d.enabled?action('release',d.device_id,'放行'):''}${action('stop',d.device_id,'停止','danger')}${action('edit',d.device_id,'编辑','subtle')}${action('qr',d.device_id,'二维码','subtle')}${action('setup',d.device_id,d.setup_pending?'配网已下发':'进入配网','subtle')}${action('pair',d.device_id,'配对','subtle')}${action('view-key',d.device_id,'查看密钥','subtle')}${action('key',d.device_id,'重设密钥','subtle')}</div>`]));
   if(focused) [...$('device-table').querySelectorAll('[data-action]')].find(b=>b.dataset.action===focusAction&&b.dataset.id===focusId)?.focus({preventScroll:true});
 }
 function renderPage(page,rows) {
@@ -171,13 +171,27 @@ $('editor-form').addEventListener('submit',async e=>{
   try {const result=await editorSave(values);if(result===false)return;$('editor').close();toast('保存成功');await load(true);}catch(err){$('editor-error').textContent=err.message;}finally{button.disabled=false;}
 });
 function confirmAction(message) { return new Promise(resolve=>{const dialog=$('confirmation');$('confirmation-text').textContent=message;dialog.returnValue='';dialog.addEventListener('close',()=>resolve(dialog.returnValue==='confirm'),{once:true});dialog.showModal();}); }
-function showCredentials(value) { $('credential-id').value=value.device_id;$('credential-key').value=value.device_key;$('credentials').showModal(); }
+function showCredentials(value) {
+  $('credential-id').value=value.device_id;$('credential-key').value=value.device_key||'';
+  $('credential-note').textContent=value.device_key?'可复制密钥手动填写，也可在配网页留空密钥，通过后台配对自动写入。':'旧设备只保存了密钥摘要。设备成功连接一次后即可查看；也可重新配对或重设密钥。';
+  $('copy-key').disabled=!value.device_key;$('credentials').showModal();
+}
 $('credentials').addEventListener('close',()=>{$('credential-key').value='';});
 async function rowAction(name,id) {
   if(name==='previous'||name==='next') {state.orderPage+=name==='next'?1:-1;await load();return;}
   const row=state.rows.find(r=>String(r.device_id??r.id)===id);
   if(!row) return;
   if(name==='edit'||name==='password') {await edit(row,name==='password'?'password':state.page);return;}
+  if(name==='view-key') {showCredentials(await api('/admin/devices/'+encodeURIComponent(id)+'/credentials'));return;}
+  if(name==='setup') {
+    if(!await confirmAction('让 '+row.name+' 进入配网？设备须处于待机。热点密码 RentGate888，连接后打开 http://192.168.4.1 修改配置。'))return;
+    await api('/admin/devices/'+encodeURIComponent(id)+'/setup','POST');
+    toast('配网已下发，请连接设备热点 RentGate-xxxxxx');
+  }
+  if(name==='pair') {
+    await api('/admin/devices/'+encodeURIComponent(id)+'/pairing','POST');
+    $('pair-device-id').value=id;$('pair-code').value='';$('pair-error').textContent='';$('pair-dialog').showModal();return;
+  }
   if(name==='qr') {
     const link=await api('/admin/devices/'+encodeURIComponent(id)+'/guest-link');$('qr-title').textContent=row.name+' · '+id;$('qr-link').value=link.url;$('qr-open').href=link.url;
     $('qr-image').src='/admin/devices/'+encodeURIComponent(id)+'/qr.png';$('qr-download').href=$('qr-image').src;$('qr-download').download=id+'-qr.png';
@@ -195,6 +209,13 @@ async function rowAction(name,id) {
 $('content').addEventListener('click',e=>{const button=e.target.closest('[data-action]');if(!button||button.disabled)return;button.disabled=true;rowAction(button.dataset.action,button.dataset.id).catch(e=>error(e.message)).finally(()=>button.disabled=false);});
 document.addEventListener('click',e=>{const close=e.target.closest('[data-close]');if(close)$(close.dataset.close).close();});
 $('copy-key').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('credential-key').value);toast('密钥已复制');}catch{$('credential-key').select();toast('请手动复制选中的密钥');}});
+$('pair-form').addEventListener('submit',async e=>{
+  e.preventDefault();const button=e.target.querySelector('[type=submit]');button.disabled=true;$('pair-error').textContent='';
+  try {
+    await api('/admin/devices/'+encodeURIComponent($('pair-device-id').value)+'/pairing/confirm','POST',{code:$('pair-code').value.trim()});
+    $('pair-dialog').close();toast('配对已确认，设备将自动保存密钥并恢复连接');await load(true);
+  }catch(err){$('pair-error').textContent=err.message;}finally{button.disabled=false;}
+});
 $('help').addEventListener('click',()=>$('help-dialog').showModal());
 $('create').addEventListener('click',()=>edit());
 $('refresh').addEventListener('click',()=>load());
