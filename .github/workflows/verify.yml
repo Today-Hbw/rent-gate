@@ -17,6 +17,7 @@ jobs:
       - run: node --check src/main/resources/static/assets/guest.js
       - run: python -m py_compile scripts/simulate_device.py
       - run: g++ -std=c++11 -Wall -Wextra -Werror firmware/test/lease_timer_test.cpp -o /tmp/lease-test && /tmp/lease-test
+      - run: g++ -std=c++11 -Wall -Wextra -Werror firmware/test/network_recovery_test.cpp -o /tmp/network-test && /tmp/network-test
   firmware:
     runs-on: ubuntu-latest
     steps:

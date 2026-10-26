@@ -5,10 +5,8 @@
 #include <LittleFS.h>
 #include <Ticker.h>
 #include <WiFiManager.h>
-extern "C" {
-#include <user_interface.h>
-}
 #include "LeaseTimer.h"
+#include "NetworkRecovery.h"
 
 #ifndef RELAY_PIN
 #define RELAY_PIN 0
@@ -24,10 +22,13 @@ static WiFiManager wifi;
 static WiFiManagerParameter serverParam("server", "Server HTTP URL (e.g. http://192.168.1.10:8080)", "", 120);
 static WiFiManagerParameter idParam("device", "Device ID", "", 64);
 static WiFiManagerParameter keyParam("key", "Device key", "", 64, "type=\"password\"");
+static constexpr char setupPassword[] = "RentGate888";
 static Ticker cutoff;
 static LeaseTimer lease;
+static NetworkRecovery networkRecovery;
 static volatile bool relayOn = false;
 static bool shouldSave = false;
+static bool needsSetup = false;
 static bool fsReady = false;
 static uint32_t lastPoll = 0;
 
@@ -67,35 +68,64 @@ static void loadConfig() {
   strlcpy(deviceKey, key, sizeof(deviceKey));
 }
 
-static void saveConfig() {
+static bool saveConfig() {
   shouldSave = false;
   const char* server = serverParam.getValue();
   const char* id = idParam.getValue();
   const char* key = keyParam.getValue();
   if (!validConfig(server, id, key)) {
-    Serial.println("Invalid config. Use HTTP URL, valid device ID and 43-character key. Send c to reopen portal.");
-    return;
+    Serial.println("Invalid config. Correct HTTP URL, device ID and 43-character key in the phone setup page.");
+    wifi.setTitle("RentGate - Invalid settings; correct and save again");
+    return false;
   }
-  if (!fsReady) { Serial.println("Cannot persist config: filesystem unavailable."); return; }
+  if (!fsReady) { Serial.println("Cannot persist config: filesystem unavailable."); return false; }
   StaticJsonDocument<512> doc;
   doc["server"] = server; doc["device"] = id; doc["key"] = key;
   File file = LittleFS.open("/config.tmp", "w");
-  if (!file || !serializeJson(doc, file)) { Serial.println("Config write failed."); return; }
+  if (!file || !serializeJson(doc, file)) { Serial.println("Config write failed."); return false; }
   file.close();
-  if (!LittleFS.rename("/config.tmp", "/config.json")) { Serial.println("Config save failed."); return; }
+  if (!LittleFS.rename("/config.tmp", "/config.json")) { Serial.println("Config save failed."); return false; }
   strlcpy(serverUrl, server, sizeof(serverUrl));
   while (strlen(serverUrl) > 7 && serverUrl[strlen(serverUrl) - 1] == '/') serverUrl[strlen(serverUrl) - 1] = '\0';
   strlcpy(deviceId, id, sizeof(deviceId));
   strlcpy(deviceKey, key, sizeof(deviceKey));
+  wifi.setTitle("RentGate setup");
   Serial.println("Config saved. Credentials are not printed.");
+  return true;
 }
 
 static void startPortal() {
-  char name[28], password[16];
+  if (wifi.getConfigPortalActive()) return;
+  char name[28];
   snprintf(name, sizeof(name), "RentGate-%06X", ESP.getChipId());
-  snprintf(password, sizeof(password), "rg%08lx", static_cast<unsigned long>(os_random()));
-  Serial.printf("Setup AP: %s | password: %s | open http://192.168.4.1\n", name, password);
-  wifi.startConfigPortal(name, password);
+  Serial.printf("Setup AP: %s | open http://192.168.4.1 on your phone\n", name);
+  wifi.startConfigPortal(name, setupPassword);
+}
+
+static void maintainNetwork() {
+  bool configured = validConfig(serverUrl, deviceId, deviceKey);
+  // With no saved SSID there is nothing to wait for on first boot.
+  bool hasSavedWifi = WiFi.SSID().length() > 0;
+  NetworkRecovery::Action action = networkRecovery.update(
+      millis(), WiFi.status() == WL_CONNECTED, configured && hasSavedWifi,
+      wifi.getConfigPortalActive(), WiFi.softAPgetStationNum() > 0, needsSetup);
+  switch (action) {
+    case NetworkRecovery::Action::StartPortal:
+      startPortal();
+      break;
+    case NetworkRecovery::Action::StopPortal:
+      wifi.stopConfigPortal();
+      WiFi.setAutoReconnect(true);
+      lastPoll = millis() - 3000;
+      break;
+    case NetworkRecovery::Action::RetryWifi:
+      // WiFiManager disables STA when opening an offline portal. Re-enable it
+      // without closing the AP, so the original network can recover unattended.
+      if (hasSavedWifi) WiFi.begin();
+      break;
+    case NetworkRecovery::Action::None:
+      break;
+  }
 }
 
 static void pollServer() {
@@ -140,7 +170,8 @@ static void pollServer() {
       }
     }
   } else if (code == 401) {
-    Serial.println("Device authentication failed. Check ID/key; send c to reconfigure.");
+    Serial.println("Device authentication failed. Opening phone setup to update ID/key.");
+    needsSetup = true;
   }
   http.end();
   // HTTP errors and WiFi loss preserve the existing lease; they never extend it.
@@ -151,7 +182,7 @@ void setup() {
   digitalWrite(RELAY_PIN, !RELAY_ACTIVE_LEVEL);
   pinMode(RELAY_PIN, OUTPUT);
   Serial.begin(115200);
-  Serial.println("\nRent Gate starting. Relay OFF. Send c to configure.");
+  Serial.println("\nRent Gate starting. Relay OFF. Phone setup opens automatically when needed.");
   loadConfig();
   serverParam.setValue(serverUrl, 120);
   idParam.setValue(deviceId, 64);
@@ -159,23 +190,32 @@ void setup() {
   wifi.addParameter(&serverParam); wifi.addParameter(&idParam); wifi.addParameter(&keyParam);
   wifi.setSaveParamsCallback([]() { shouldSave = true; });
   wifi.setConfigPortalBlocking(false);
-  wifi.setConfigPortalTimeout(180);
+  wifi.setConfigPortalTimeout(0);
+  // Close only after both WiFi and our own persisted device settings are valid.
+  wifi.setDisableConfigPortal(false);
+  wifi.setSaveConnectTimeout(15);
+  wifi.setWiFiAutoReconnect(true);
+  wifi.setTitle("RentGate setup");
+  const char* menu[] = {"wifi", "info"};
+  wifi.setMenu(menu, 2);
   wifi.setDebugOutput(false);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin();
-  if (!validConfig(serverUrl, deviceId, deviceKey)) startPortal();
+  maintainNetwork();
   lastPoll = millis() - 3000;
 }
 
 void loop() {
   wifi.process();
-  if (shouldSave) saveConfig();
+  if (shouldSave) needsSetup = !saveConfig();
   if (!lease.tick(millis()) && relayOn) { cutoff.detach(); relayOff(); }
   if (Serial.available() && Serial.read() == 'c') {
     cutoff.detach(); lease.stop(); relayOff();
+    needsSetup = true;
     startPortal();
   }
+  maintainNetwork();
   if (millis() - lastPoll >= 3000) { lastPoll = millis(); pollServer(); }
   delay(5);
 }
